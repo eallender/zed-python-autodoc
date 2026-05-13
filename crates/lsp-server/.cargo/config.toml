@@ -1,0 +1,7 @@
+# Override root config - build LSP server natively, not for WASM
+[build]
+target-dir = "../../target"
+
+# Explicitly unset WASM target from parent config
+[env]
+CARGO_BUILD_TARGET = { force = false, value = "" }
