@@ -127,9 +127,36 @@ impl LanguageServer for Backend {
         let indent_len = current_line.len() - current_line.trim_start().len();
         let indent = " ".repeat(indent_len);
 
+        // Prefix each non-empty body line with the current indentation so the
+        // snippet lands at the right column regardless of editor auto-indent.
+        let indented_body = body
+            .lines()
+            .map(|line| {
+                if line.is_empty() {
+                    String::new()
+                } else {
+                    format!("{}{}", indent, line)
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+
         // Snippet inserted right after the opening `"""` the user typed.
         // $1 = summary tab stop; closing `"""` on its own indented line.
-        let snippet = format!("{}\n{}\"\"\"", body, indent);
+        let snippet = format!("{}\n{}\"\"\"", indented_body, indent);
+
+        // If the editor auto-paired a closing `"""` after the cursor, replace
+        // it so we don't end up with `""""""`.
+        let after_cursor = &current_line[cursor_char..];
+        let end_char = if after_cursor.starts_with("\"\"\"") {
+            cursor_char + 3
+        } else {
+            cursor_char
+        };
+        let end_position = Position {
+            line: position.line,
+            character: end_char as u32,
+        };
 
         let item = CompletionItem {
             label: "\"\"\"  Generate PEP 257 docstring".to_string(),
@@ -138,7 +165,7 @@ impl LanguageServer for Backend {
             text_edit: Some(CompletionTextEdit::Edit(TextEdit {
                 range: Range {
                     start: position,
-                    end: position,
+                    end: end_position,
                 },
                 new_text: snippet,
             })),

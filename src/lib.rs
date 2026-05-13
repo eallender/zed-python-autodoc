@@ -45,31 +45,40 @@ impl PythonAutodocExtension {
             "python-autodoc-lsp"
         };
 
+        eprintln!("[python-autodoc] looking for binary '{}', worktree root: {}", binary_name, worktree.root_path());
+
         // First, try to find the binary in the project's target directory (for dev extensions)
         let target_paths = [
+            format!("target/aarch64-apple-darwin/release/{}", binary_name),
             format!("target/x86_64-unknown-linux-gnu/release/{}", binary_name),
             format!("target/release/{}", binary_name),
         ];
 
         for rel_path in &target_paths {
             let full_path = format!("{}/{}", worktree.root_path(), rel_path);
+            eprintln!("[python-autodoc] checking path: {}", full_path);
             if std::path::Path::new(&full_path).exists() {
+                eprintln!("[python-autodoc] found at: {}", full_path);
                 self.cached_binary_path = Some(full_path.clone());
                 return Ok(full_path);
             }
         }
 
         // Fallback: try to find it on PATH
+        eprintln!("[python-autodoc] trying which({})", binary_name);
         if let Some(path) = worktree.which(binary_name) {
+            eprintln!("[python-autodoc] found via which: {}", path);
             self.cached_binary_path = Some(path.clone());
             return Ok(path);
         }
 
-        Err(format!(
+        let err = format!(
             "python-autodoc-lsp binary not found. \
-             Please build the LSP server with `cargo build --release --target x86_64-unknown-linux-gnu` \
-             from the crates/lsp-server directory."
-        ))
+             Please build the LSP server with `cargo build --release --target aarch64-apple-darwin` \
+             from the crates/lsp-server directory, or add python-autodoc-lsp to your PATH."
+        );
+        eprintln!("[python-autodoc] ERROR: {}", err);
+        Err(err)
     }
 }
 

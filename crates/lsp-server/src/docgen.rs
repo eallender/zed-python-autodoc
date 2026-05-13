@@ -126,8 +126,8 @@ fn build_function_docstring(node: Node, src: &[u8]) -> Option<String> {
 
     let mut lines: Vec<String> = Vec::new();
 
-    // Summary placeholder — LSP snippet tab stop
-    lines.push("\n$1".to_string());
+    // Summary placeholder — LSP snippet tab stop with visible placeholder text
+    lines.push("\n${1:Summary.}".to_string());
 
     if !args.is_empty() {
         lines.push(String::new());
@@ -162,7 +162,7 @@ fn build_function_docstring(node: Node, src: &[u8]) -> Option<String> {
 
 fn build_class_docstring(node: Node, src: &[u8]) -> Option<String> {
     let mut lines: Vec<String> = Vec::new();
-    lines.push("\n$1".to_string());
+    lines.push("\n${1:Summary.}".to_string());
 
     // Look for __init__ to document constructor args
     let body = node.child_by_field_name("body")?;
@@ -218,8 +218,9 @@ fn collect_args(params_node: Node, src: &[u8]) -> Vec<(String, Option<String>, O
                 args.push((name, None, None));
             }
             "typed_parameter" => {
+                // The identifier is the first child, not a named field in tree-sitter-python
                 let name = child
-                    .child_by_field_name("name")
+                    .child(0)
                     .map(|n| node_text(n, src).to_string())
                     .unwrap_or_default();
                 if name == "self" || name == "cls" {
