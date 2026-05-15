@@ -8,30 +8,20 @@ use tower_lsp_server::ls_types::*;
 use tower_lsp_server::{Client, LanguageServer, LspService, Server};
 
 /// Simple in-memory store for open document contents, keyed by URI.
-#[derive(Default)]
+#[derive(Default, Debug)]
 struct DocumentStore {
     docs: Mutex<HashMap<String, String>>,
 }
 
 impl DocumentStore {
-    fn open(&self, uri: &str, text: String) {
-        self.docs.lock().unwrap().insert(uri.to_string(), text);
-    }
     fn update(&self, uri: &str, text: String) {
-        self.docs.lock().unwrap().insert(uri.to_string(), text);
+        self.docs.lock().expect("DocumentStore lock poisoned").insert(uri.to_string(), text);
     }
     fn close(&self, uri: &str) {
-        self.docs.lock().unwrap().remove(uri);
+        self.docs.lock().expect("DocumentStore lock poisoned").remove(uri);
     }
     fn get(&self, uri: &str) -> Option<String> {
-        self.docs.lock().unwrap().get(uri).cloned()
-    }
-}
-
-// DocumentStore doesn't contain a Client so Debug is fine to derive manually.
-impl std::fmt::Debug for DocumentStore {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("DocumentStore").finish()
+        self.docs.lock().expect("DocumentStore lock poisoned").get(uri).cloned()
     }
 }
 
@@ -71,14 +61,19 @@ impl LanguageServer for Backend {
         Ok(())
     }
 
-    // ── Document sync ────────────────────────────────────────────────────────
+    // -- Document sync --
 
     async fn did_open(&self, params: DidOpenTextDocumentParams) {
         self.store
-            .open(&params.text_document.uri.to_string(), params.text_document.text);
+            .update(&params.text_document.uri.to_string(), params.text_document.text);
     }
 
     async fn did_change(&self, params: DidChangeTextDocumentParams) {
+        if params.content_changes.len() > 1 {
+            self.client
+                .log_message(MessageType::WARNING, "python-autodoc: received incremental sync; expected FULL")
+                .await;
+        }
         // FULL sync — last change event contains the whole document
         if let Some(change) = params.content_changes.into_iter().last() {
             self.store
@@ -90,7 +85,7 @@ impl LanguageServer for Backend {
         self.store.close(&params.text_document.uri.to_string());
     }
 
-    // ── Completions ──────────────────────────────────────────────────────────
+    // -- Completions --
 
     async fn completion(&self, params: CompletionParams) -> Result<Option<CompletionResponse>> {
         let position = params.text_document_position.position;

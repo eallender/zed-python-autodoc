@@ -5,7 +5,16 @@
 /// the LSP layer adds those).
 use tree_sitter::{Node, Parser};
 
-// ── Public API ────────────────────────────────────────────────────────────────
+thread_local! {
+    static PARSER: std::cell::RefCell<Parser> = std::cell::RefCell::new({
+        let mut p = Parser::new();
+        p.set_language(&tree_sitter_python::LANGUAGE.into())
+            .expect("tree-sitter-python language init failed");
+        p
+    });
+}
+
+// -- Public API --
 
 /// Walk upward from `cursor_line - 1` and return the source of the nearest
 /// `def` or `class` statement, or `None` if not found.
@@ -17,40 +26,49 @@ use tree_sitter::{Node, Parser};
 ///     b: str,
 /// ) -> bool:
 /// ```
+/// Maximum lines to scan upward when looking for a def/class header.
+const MAX_SIGNATURE_LINES: usize = 50;
+
 pub fn find_definition_above(lines: &[&str], cursor_line: usize) -> Option<String> {
-    if cursor_line == 0 {
+    if lines.is_empty() || cursor_line == 0 {
         return None;
     }
 
-    // Walk upward to find the start of a def/class
+    // Walk upward (bounded) to find the start of a def/class header.
+    let search_from = cursor_line.saturating_sub(MAX_SIGNATURE_LINES);
     let mut start = None;
-    for i in (0..cursor_line).rev() {
+    let mut is_class = false;
+    for i in (search_from..cursor_line).rev() {
         let stripped = lines[i].trim_start();
-        if stripped.starts_with("def ")
-            || stripped.starts_with("class ")
-            || stripped.starts_with("async def ")
-        {
+        if stripped.starts_with("def ") || stripped.starts_with("async def ") {
             start = Some(i);
             break;
-        }
-        // Stop scanning if we hit something clearly unrelated
-        if i < cursor_line.saturating_sub(1)
-            && !stripped.is_empty()
-            && !stripped.starts_with(')')
-            && !stripped.starts_with('#')
-        {
+        } else if stripped.starts_with("class ") {
+            start = Some(i);
+            is_class = true;
             break;
         }
     }
 
     let start = start?;
 
-    // Collect lines from start up to (but not including) cursor_line
-    let source = lines[start..cursor_line].join("\n");
-    let trimmed = source.trim_end();
+    // For functions: collect from the def line up to cursor_line.
+    if !is_class {
+        let source = lines[start..cursor_line].join("\n");
+        // Must end with `:` — rejects stray defs separated from the cursor by a body.
+        if !source.trim_end().ends_with(':') {
+            return None;
+        }
+        return Some(source);
+    }
 
-    // Must end with `:` to be a valid header
-    if !trimmed.ends_with(':') {
+    // For classes: just capture the class header (up to cursor_line)
+    // Per PEP 257, __init__ parameters should be documented in __init__'s
+    // own docstring, not in the class docstring.
+    let source = lines[start..cursor_line].join("\n");
+
+    // Must end with `:` — rejects stray defs separated from the cursor by a body.
+    if !source.trim_end().ends_with(':') {
         return None;
     }
 
@@ -60,35 +78,36 @@ pub fn find_definition_above(lines: &[&str], cursor_line: usize) -> Option<Strin
 /// Parse the definition source and generate a PEP 257 docstring body.
 /// Returns `None` if the source can't be parsed.
 pub fn generate_docstring(definition_source: &str) -> Option<String> {
-    let mut parser = Parser::new();
-    parser
-        .set_language(&tree_sitter_python::LANGUAGE.into())
-        .ok()?;
+    PARSER.with(|cell| -> Option<String> {
+        let mut parser = cell.borrow_mut();
 
-    // Append a dummy body so tree-sitter sees a complete function/class node
-    let full_source = format!("{}\n    pass", definition_source);
-    let tree = parser.parse(&full_source, None)?;
-    let root = tree.root_node();
+        // Append a dummy body so tree-sitter sees a complete function/class node
+        let full_source = format!("{}\n    pass", definition_source);
+        let tree = parser.parse(&full_source, None)?;
+        let root = tree.root_node();
 
-    // Find the first function_definition, async function_definition, or class_definition
-    let node = first_def_node(root, full_source.as_bytes())?;
+        // Find the first function_definition, async function_definition, or class_definition
+        let node = first_def_node(root, full_source.as_bytes())?;
 
-    match node.kind() {
-        "function_definition" | "decorated_definition" => {
-            // decorated_definition wraps async def too; drill in
-            let fn_node = if node.kind() == "decorated_definition" {
-                node.child_by_field_name("definition")?
-            } else {
-                node
-            };
-            build_function_docstring(fn_node, full_source.as_bytes())
+        match node.kind() {
+            "function_definition" => build_function_docstring(node, full_source.as_bytes()),
+            "class_definition" => build_class_docstring(node, full_source.as_bytes()),
+            "decorated_definition" => {
+                let inner = node.child_by_field_name("definition")?;
+                match inner.kind() {
+                    "function_definition" => {
+                        build_function_docstring(inner, full_source.as_bytes())
+                    }
+                    "class_definition" => build_class_docstring(inner, full_source.as_bytes()),
+                    _ => None,
+                }
+            }
+            _ => None,
         }
-        "class_definition" => build_class_docstring(node, full_source.as_bytes()),
-        _ => None,
-    }
+    })
 }
 
-// ── Tree-sitter helpers ───────────────────────────────────────────────────────
+// -- Tree-sitter helpers --
 
 fn first_def_node<'a>(node: Node<'a>, src: &[u8]) -> Option<Node<'a>> {
     if matches!(
@@ -110,7 +129,7 @@ fn node_text<'a>(node: Node, src: &'a [u8]) -> &'a str {
     std::str::from_utf8(&src[node.byte_range()]).unwrap_or("")
 }
 
-// ── Docstring builders ────────────────────────────────────────────────────────
+// -- Docstring builders --
 
 fn format_arg_line(
     name: &str,
@@ -130,7 +149,10 @@ fn format_arg_line(
         .unwrap_or_default();
     let desc = *counter;
     *counter += 1;
-    format!("    {}{}: ${{{}:Description{}.}}", name, type_part, desc, default_part)
+    format!(
+        "    {}{}: ${{{}:Description{}.}}",
+        name, type_part, desc, default_part
+    )
 }
 
 fn append_args_section(
@@ -144,7 +166,12 @@ fn append_args_section(
     lines.push(String::new());
     lines.push("Args:".to_string());
     for (name, annotation, default) in args {
-        lines.push(format_arg_line(name, annotation.as_deref(), default.as_deref(), counter));
+        lines.push(format_arg_line(
+            name,
+            annotation.as_deref(),
+            default.as_deref(),
+            counter,
+        ));
     }
 }
 
@@ -177,30 +204,13 @@ fn build_function_docstring(node: Node, src: &[u8]) -> Option<String> {
     Some(lines.join("\n"))
 }
 
-fn build_class_docstring(node: Node, src: &[u8]) -> Option<String> {
-    let mut lines: Vec<String> = Vec::new();
-    lines.push("\n${1:Summary.}".to_string());
-
-    let body = node.child_by_field_name("body")?;
-    let mut cursor = body.walk();
-    let mut counter: u32 = 2;
-    for child in body.children(&mut cursor) {
-        if child.kind() == "function_definition" {
-            if let Some(name_node) = child.child_by_field_name("name") {
-                if node_text(name_node, src) == "__init__" {
-                    if let Some(params) = child.child_by_field_name("parameters") {
-                        append_args_section(&mut lines, &collect_args(params, src), &mut counter);
-                    }
-                    break;
-                }
-            }
-        }
-    }
-
-    Some(lines.join("\n"))
+fn build_class_docstring(_node: Node, _src: &[u8]) -> Option<String> {
+    // Per PEP 257, class docstrings should describe the class itself,
+    // not document __init__ parameters. Those belong in __init__'s docstring.
+    Some("\n${1:Summary.}".to_string())
 }
 
-// ── Argument collection ───────────────────────────────────────────────────────
+// -- Argument collection --
 
 /// Returns (name, type_annotation, default_value) for each parameter,
 /// skipping `self` and `cls`.
@@ -283,7 +293,7 @@ fn collect_args(params_node: Node, src: &[u8]) -> Vec<(String, Option<String>, O
     args
 }
 
-// ── Tests ─────────────────────────────────────────────────────────────────────
+// -- Tests --
 
 #[cfg(test)]
 mod tests {
@@ -297,7 +307,8 @@ mod tests {
     fn test_simple_function() {
         let src = "def greet(name: str, times: int = 1) -> str:\n    \"\"\"";
         let ls = lines(src);
-        let def = find_definition_above(&ls, ls.len() - 1).unwrap();
+        let cursor_line = ls.len() - 1; // Position of the """ line
+        let def = find_definition_above(&ls, cursor_line).unwrap();
         let doc = generate_docstring(&def).unwrap();
         assert!(doc.contains("name (str)"));
         assert!(doc.contains("times (int)"));
@@ -309,7 +320,8 @@ mod tests {
     fn test_no_annotations() {
         let src = "def add(a, b):\n    \"\"\"";
         let ls = lines(src);
-        let def = find_definition_above(&ls, ls.len() - 1).unwrap();
+        let cursor_line = ls.len() - 1;
+        let def = find_definition_above(&ls, cursor_line).unwrap();
         let doc = generate_docstring(&def).unwrap();
         assert!(doc.contains("a (${"));
         assert!(doc.contains("b (${"));
@@ -319,7 +331,8 @@ mod tests {
     fn test_skips_self() {
         let src = "def save(self, path: str) -> None:\n    \"\"\"";
         let ls = lines(src);
-        let def = find_definition_above(&ls, ls.len() - 1).unwrap();
+        let cursor_line = ls.len() - 1;
+        let def = find_definition_above(&ls, cursor_line).unwrap();
         let doc = generate_docstring(&def).unwrap();
         assert!(!doc.contains("self"));
         assert!(doc.contains("path (str)"));
@@ -329,7 +342,8 @@ mod tests {
     fn test_none_return_omitted() {
         let src = "def reset(self) -> None:\n    \"\"\"";
         let ls = lines(src);
-        let def = find_definition_above(&ls, ls.len() - 1).unwrap();
+        let cursor_line = ls.len() - 1;
+        let def = find_definition_above(&ls, cursor_line).unwrap();
         let doc = generate_docstring(&def).unwrap();
         assert!(!doc.contains("Returns:"));
     }
@@ -338,8 +352,45 @@ mod tests {
     fn test_class() {
         let src = "class MyModel:\n    \"\"\"";
         let ls = lines(src);
-        let def = find_definition_above(&ls, ls.len() - 1).unwrap();
+        let cursor_line = ls.len() - 1;
+        let def = find_definition_above(&ls, cursor_line).unwrap();
         let doc = generate_docstring(&def).unwrap();
         assert!(doc.contains("${1")); // has summary placeholder
+    }
+
+    #[test]
+    fn test_multiline_signature() {
+        let src = "def foo(\n    a: int,\n    b: str,\n) -> bool:\n    \"\"\"";
+        let ls = lines(src);
+        let cursor_line = ls.len() - 1;
+        let def = find_definition_above(&ls, cursor_line).unwrap();
+        let doc = generate_docstring(&def).unwrap();
+        assert!(doc.contains("a (int)"));
+        assert!(doc.contains("b (str)"));
+        assert!(doc.contains("Returns:"));
+    }
+
+    #[test]
+    fn test_class_with_init_args() {
+        // Per PEP 257, class docstrings should not include __init__ args
+        let src = "class Point:\n    def __init__(self, x: float, y: float):\n        pass";
+        let doc = generate_docstring(src).unwrap();
+        assert!(doc.contains("${1")); // has summary placeholder
+        assert!(!doc.contains("x (")); // should NOT contain __init__ args
+        assert!(!doc.contains("Args:"));
+    }
+
+    #[test]
+    fn test_init_method_docstring() {
+        // __init__ should be documented like any other method
+        let src = "def __init__(self, x: float, y: float):\n    \"\"\"";
+        let ls = lines(src);
+        let cursor_line = ls.len() - 1;
+        let def = find_definition_above(&ls, cursor_line).unwrap();
+        let doc = generate_docstring(&def).unwrap();
+        assert!(doc.contains("x (float)"));
+        assert!(doc.contains("y (float)"));
+        assert!(!doc.contains("self")); // self should be skipped
+        assert!(doc.contains("Args:"));
     }
 }
