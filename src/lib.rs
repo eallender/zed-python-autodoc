@@ -43,45 +43,60 @@ impl PythonAutodocExtension {
         let target_triple = match (os, arch) {
             (zed::Os::Mac, zed::Architecture::Aarch64) => "aarch64-apple-darwin",
             (zed::Os::Mac, zed::Architecture::X8664) => "x86_64-apple-darwin",
-            (zed::Os::Mac, zed::Architecture::X86) => "i686-apple-darwin",
             (zed::Os::Linux, zed::Architecture::Aarch64) => "aarch64-unknown-linux-gnu",
             (zed::Os::Linux, zed::Architecture::X8664) => "x86_64-unknown-linux-gnu",
             (zed::Os::Linux, zed::Architecture::X86) => "i686-unknown-linux-gnu",
             (zed::Os::Windows, zed::Architecture::Aarch64) => "aarch64-pc-windows-msvc",
             (zed::Os::Windows, zed::Architecture::X8664) => "x86_64-pc-windows-msvc",
             (zed::Os::Windows, zed::Architecture::X86) => "i686-pc-windows-msvc",
+            _ => return Err("python-autodoc-lsp does not support this platform".to_string()),
         };
 
-        let target_paths = [
+        // Dev: look for a locally-built binary in the open worktree's target/ directory.
+        let root = std::path::PathBuf::from(worktree.root_path());
+        for rel_path in &[
             format!("target/{}/release/{}", target_triple, binary_name),
             format!("target/release/{}", binary_name),
-        ];
-
-        for rel_path in &target_paths {
-            let full_path = format!("{}/{}", worktree.root_path(), rel_path);
-            eprintln!("[python-autodoc] checking: {}", full_path);
-            if std::path::Path::new(&full_path).exists() {
-                eprintln!("[python-autodoc] found at: {}", full_path);
-                self.cached_binary_path = Some(full_path.clone());
-                return Ok(full_path);
+        ] {
+            let full_path = root.join(rel_path);
+            if full_path.exists() {
+                let path = full_path.to_string_lossy().into_owned();
+                self.cached_binary_path = Some(path.clone());
+                return Ok(path);
             }
         }
 
-        eprintln!("[python-autodoc] trying PATH lookup for '{}'", binary_name);
+        // Installed extension: download the pre-built binary from GitHub Releases.
+        // Release assets must follow the naming convention:
+        //   python-autodoc-lsp-{target_triple}.tar.gz
+        // containing a single `python-autodoc-lsp[.exe]` binary at the archive root.
+        let asset = format!("python-autodoc-lsp-{}.tar.gz", target_triple);
+        let url = format!(
+            "https://github.com/eallender/zed-python-autodoc/releases/download/v{}/{}",
+            env!("CARGO_PKG_VERSION"),
+            asset
+        );
+        let download_err = match zed::download_file(&url, binary_name, zed::DownloadedFileType::GzipTar) {
+            Ok(()) => {
+                zed::make_file_executable(binary_name)?;
+                self.cached_binary_path = Some(binary_name.to_string());
+                return Ok(binary_name.to_string());
+            }
+            Err(e) => e,
+        };
+
+        // Last resort: binary installed globally on PATH.
         if let Some(path) = worktree.which(binary_name) {
-            eprintln!("[python-autodoc] found via PATH: {}", path);
             self.cached_binary_path = Some(path.clone());
             return Ok(path);
         }
 
-        let err = format!(
+        Err(format!(
             "python-autodoc-lsp binary not found. \
-             Build it with `cargo build --release --target {}` \
+             Download from GitHub Releases failed ({download_err}). \
+             Build it with `cargo build --release --target {target_triple}` \
              from the crates/lsp-server directory, or add python-autodoc-lsp to your PATH.",
-            target_triple
-        );
-        eprintln!("[python-autodoc] ERROR: {}", err);
-        Err(err)
+        ))
     }
 }
 
