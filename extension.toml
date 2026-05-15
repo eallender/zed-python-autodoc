@@ -8,8 +8,7 @@ repository = "https://github.com/eallender/zed-python-autodoc"
 
 [language_servers.python-autodoc]
 name = "Python Autodoc LSP"
-language = "Python"
-languages = []
+languages = ["Python"]
 
 [language_servers.python-autodoc.language_ids]
 Python = "python"

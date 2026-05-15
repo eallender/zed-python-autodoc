@@ -1,3 +1,7 @@
+[workspace]
+members = [".", "crates/lsp-server"]
+resolver = "2"
+
 [package]
 name = "python-autodoc"
 version = "0.0.1"

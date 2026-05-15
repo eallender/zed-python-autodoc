@@ -112,6 +112,42 @@ fn node_text<'a>(node: Node, src: &'a [u8]) -> &'a str {
 
 // ── Docstring builders ────────────────────────────────────────────────────────
 
+fn format_arg_line(
+    name: &str,
+    annotation: Option<&str>,
+    default: Option<&str>,
+    counter: &mut u32,
+) -> String {
+    let type_part = if let Some(t) = annotation {
+        format!(" ({})", t)
+    } else {
+        let n = *counter;
+        *counter += 1;
+        format!(" (${{{}:type}})", n)
+    };
+    let default_part = default
+        .map(|d| format!(", optional (default: {})", d))
+        .unwrap_or_default();
+    let desc = *counter;
+    *counter += 1;
+    format!("    {}{}: ${{{}:Description{}.}}", name, type_part, desc, default_part)
+}
+
+fn append_args_section(
+    lines: &mut Vec<String>,
+    args: &[(String, Option<String>, Option<String>)],
+    counter: &mut u32,
+) {
+    if args.is_empty() {
+        return;
+    }
+    lines.push(String::new());
+    lines.push("Args:".to_string());
+    for (name, annotation, default) in args {
+        lines.push(format_arg_line(name, annotation.as_deref(), default.as_deref(), counter));
+    }
+}
+
 fn build_function_docstring(node: Node, src: &[u8]) -> Option<String> {
     let params_node = node.child_by_field_name("parameters")?;
     let return_node = node.child_by_field_name("return_type");
@@ -125,35 +161,16 @@ fn build_function_docstring(node: Node, src: &[u8]) -> Option<String> {
     });
 
     let mut lines: Vec<String> = Vec::new();
-
-    // Summary placeholder — LSP snippet tab stop with visible placeholder text
     lines.push("\n${1:Summary.}".to_string());
 
-    if !args.is_empty() {
-        lines.push(String::new());
-        lines.push("Args:".to_string());
-        for (name, annotation, default) in &args {
-            let type_part = annotation
-                .as_deref()
-                .map(|t| format!(" ({})", t))
-                .unwrap_or_default();
-            let default_part = default
-                .as_deref()
-                .map(|d| format!(", optional (default: {})", d))
-                .unwrap_or_default();
-            lines.push(format!(
-                "    {}{}: ${{0:Description{}.}}",
-                name, type_part, default_part
-            ));
-        }
-    }
+    let mut counter: u32 = 2;
+    append_args_section(&mut lines, &args, &mut counter);
 
     if let Some(ret) = &return_type {
-        // Skip uninformative return annotations
         if ret != "None" && ret != "none" && !ret.is_empty() {
             lines.push(String::new());
             lines.push("Returns:".to_string());
-            lines.push(format!("    {}: ${{0:Description.}}", ret));
+            lines.push(format!("    {}: ${{{}:Description.}}", ret, counter));
         }
     }
 
@@ -164,34 +181,18 @@ fn build_class_docstring(node: Node, src: &[u8]) -> Option<String> {
     let mut lines: Vec<String> = Vec::new();
     lines.push("\n${1:Summary.}".to_string());
 
-    // Look for __init__ to document constructor args
     let body = node.child_by_field_name("body")?;
     let mut cursor = body.walk();
+    let mut counter: u32 = 2;
     for child in body.children(&mut cursor) {
         if child.kind() == "function_definition" {
-            let name_node = child.child_by_field_name("name")?;
-            if node_text(name_node, src) == "__init__" {
-                let params = child.child_by_field_name("parameters")?;
-                let args = collect_args(params, src);
-                if !args.is_empty() {
-                    lines.push(String::new());
-                    lines.push("Args:".to_string());
-                    for (name, annotation, default) in &args {
-                        let type_part = annotation
-                            .as_deref()
-                            .map(|t| format!(" ({})", t))
-                            .unwrap_or_default();
-                        let default_part = default
-                            .as_deref()
-                            .map(|d| format!(", optional (default: {})", d))
-                            .unwrap_or_default();
-                        lines.push(format!(
-                            "    {}{}: ${{0:Description{}.}}",
-                            name, type_part, default_part
-                        ));
+            if let Some(name_node) = child.child_by_field_name("name") {
+                if node_text(name_node, src) == "__init__" {
+                    if let Some(params) = child.child_by_field_name("parameters") {
+                        append_args_section(&mut lines, &collect_args(params, src), &mut counter);
                     }
+                    break;
                 }
-                break;
             }
         }
     }
@@ -310,8 +311,8 @@ mod tests {
         let ls = lines(src);
         let def = find_definition_above(&ls, ls.len() - 1).unwrap();
         let doc = generate_docstring(&def).unwrap();
-        assert!(doc.contains("a:"));
-        assert!(doc.contains("b:"));
+        assert!(doc.contains("a (${"));
+        assert!(doc.contains("b (${"));
     }
 
     #[test]
@@ -339,6 +340,6 @@ mod tests {
         let ls = lines(src);
         let def = find_definition_above(&ls, ls.len() - 1).unwrap();
         let doc = generate_docstring(&def).unwrap();
-        assert!(doc.contains("$1")); // has summary placeholder
+        assert!(doc.contains("${1")); // has summary placeholder
     }
 }
