@@ -547,4 +547,82 @@ mod tests {
         assert!(doc.contains("Returns:"));
         assert!(doc.contains("dict[str, Any]"));
     }
+
+    // -- Nested Function Tests --
+
+    #[test]
+    fn test_nested_function_basic() {
+        let src = "def outer():\n    def inner(x: int) -> str:\n        \"\"\"";
+        let ls = lines(src);
+        let cursor_line = ls.len() - 1;
+        let def = find_definition_above(&ls, cursor_line).unwrap();
+        let doc = generate_docstring(&def).unwrap();
+        assert!(doc.contains("x (int)"));
+        assert!(doc.contains("Returns:"));
+        assert!(doc.contains("str"));
+    }
+
+    #[test]
+    fn test_nested_function_with_outer_params() {
+        let src = "def outer(a: str, b: int):\n    def inner(x: float, y: bool = True) -> list:\n        \"\"\"";
+        let ls = lines(src);
+        let cursor_line = ls.len() - 1;
+        let def = find_definition_above(&ls, cursor_line).unwrap();
+        let doc = generate_docstring(&def).unwrap();
+        // Should document the inner function, not the outer
+        assert!(doc.contains("x (float)"));
+        assert!(doc.contains("y (bool)"));
+        assert!(!doc.contains("a (")); // outer params should not appear
+        assert!(!doc.contains("b ("));
+        assert!(doc.contains("Returns:"));
+        assert!(doc.contains("list"));
+    }
+
+    #[test]
+    fn test_deeply_nested_function() {
+        let src = "def level1():\n    def level2():\n        def level3(z: dict) -> None:\n            \"\"\"";
+        let ls = lines(src);
+        let cursor_line = ls.len() - 1;
+        let def = find_definition_above(&ls, cursor_line).unwrap();
+        let doc = generate_docstring(&def).unwrap();
+        assert!(doc.contains("z (dict)"));
+        assert!(!doc.contains("Returns:")); // None should be omitted
+    }
+
+    #[test]
+    fn test_nested_function_multiline() {
+        let src = "def outer():\n    def inner(\n        x: int,\n        y: str,\n    ) -> bool:\n        \"\"\"";
+        let ls = lines(src);
+        let cursor_line = ls.len() - 1;
+        let def = find_definition_above(&ls, cursor_line).unwrap();
+        let doc = generate_docstring(&def).unwrap();
+        assert!(doc.contains("x (int)"));
+        assert!(doc.contains("y (str)"));
+        assert!(doc.contains("Returns:"));
+        assert!(doc.contains("bool"));
+    }
+
+    #[test]
+    fn test_nested_async_function() {
+        let src = "def outer():\n    async def inner(url: str) -> dict:\n        \"\"\"";
+        let ls = lines(src);
+        let cursor_line = ls.len() - 1;
+        let def = find_definition_above(&ls, cursor_line).unwrap();
+        let doc = generate_docstring(&def).unwrap();
+        assert!(doc.contains("url (str)"));
+        assert!(doc.contains("Returns:"));
+        assert!(doc.contains("dict"));
+    }
+
+    #[test]
+    fn test_nested_function_complex_types() {
+        let src = "def outer():\n    def inner(data: list[dict[str, Any]]) -> Optional[str]:\n        \"\"\"";
+        let ls = lines(src);
+        let cursor_line = ls.len() - 1;
+        let def = find_definition_above(&ls, cursor_line).unwrap();
+        let doc = generate_docstring(&def).unwrap();
+        assert!(doc.contains("data (list[dict[str, Any]])"));
+        assert!(doc.contains("Returns:"));
+        assert!(doc.contains("Optional[str]"));
+    }
 }
