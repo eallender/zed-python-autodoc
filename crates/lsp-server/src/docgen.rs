@@ -393,4 +393,158 @@ mod tests {
         assert!(!doc.contains("self")); // self should be skipped
         assert!(doc.contains("Args:"));
     }
+
+    // -- Complex Type Annotation Tests --
+
+    #[test]
+    fn test_union_type_old_syntax() {
+        let src = "def process_value(value: Union[str, int], default: Union[str, int] = 0) -> Union[str, int]:\n    \"\"\"";
+        let ls = lines(src);
+        let cursor_line = ls.len() - 1;
+        let def = find_definition_above(&ls, cursor_line).unwrap();
+        let doc = generate_docstring(&def).unwrap();
+        assert!(doc.contains("value (Union[str, int])"));
+        assert!(doc.contains("default (Union[str, int])"));
+        assert!(doc.contains("Returns:"));
+        assert!(doc.contains("Union[str, int]"));
+    }
+
+    #[test]
+    fn test_union_type_pipe_syntax() {
+        let src = "def process_value(value: str | int, default: str | int = 0) -> str | int:\n    \"\"\"";
+        let ls = lines(src);
+        let cursor_line = ls.len() - 1;
+        let def = find_definition_above(&ls, cursor_line).unwrap();
+        let doc = generate_docstring(&def).unwrap();
+        assert!(doc.contains("value (str | int)"));
+        assert!(doc.contains("default (str | int)"));
+        assert!(doc.contains("Returns:"));
+        assert!(doc.contains("str | int"));
+    }
+
+    #[test]
+    fn test_optional_type() {
+        let src = "def find_user(user_id: int, cache: Optional[dict] = None) -> Optional[str]:\n    \"\"\"";
+        let ls = lines(src);
+        let cursor_line = ls.len() - 1;
+        let def = find_definition_above(&ls, cursor_line).unwrap();
+        let doc = generate_docstring(&def).unwrap();
+        assert!(doc.contains("user_id (int)"));
+        assert!(doc.contains("cache (Optional[dict])"));
+        assert!(doc.contains("Returns:"));
+        assert!(doc.contains("Optional[str]"));
+    }
+
+    #[test]
+    fn test_callable_type() {
+        let src = "def register_callback(\n    callback: Callable[[int, str], bool],\n    fallback: Callable[[str], None] = None,\n) -> None:\n    \"\"\"";
+        let ls = lines(src);
+        let cursor_line = ls.len() - 1;
+        let def = find_definition_above(&ls, cursor_line).unwrap();
+        let doc = generate_docstring(&def).unwrap();
+        assert!(doc.contains("callback (Callable[[int, str], bool])"));
+        assert!(doc.contains("fallback (Callable[[str], None])"));
+        assert!(!doc.contains("Returns:")); // None return should be omitted
+    }
+
+    #[test]
+    fn test_nested_generic_types() {
+        let src = "def merge_data(\n    data: list[dict[str, Any]],\n    overrides: dict[str, list[int]] = None,\n) -> list[dict[str, Any]]:\n    \"\"\"";
+        let ls = lines(src);
+        let cursor_line = ls.len() - 1;
+        let def = find_definition_above(&ls, cursor_line).unwrap();
+        let doc = generate_docstring(&def).unwrap();
+        assert!(doc.contains("data (list[dict[str, Any]])"));
+        assert!(doc.contains("overrides (dict[str, list[int]])"));
+        assert!(doc.contains("Returns:"));
+        assert!(doc.contains("list[dict[str, Any]]"));
+    }
+
+    #[test]
+    fn test_generic_typevar() {
+        let src = "def get_first(items: List[T], default: T = None) -> T:\n    \"\"\"";
+        let ls = lines(src);
+        let cursor_line = ls.len() - 1;
+        let def = find_definition_above(&ls, cursor_line).unwrap();
+        let doc = generate_docstring(&def).unwrap();
+        assert!(doc.contains("items (List[T])"));
+        assert!(doc.contains("default (T)"));
+        assert!(doc.contains("Returns:"));
+        assert!(doc.contains("T:"));
+    }
+
+    #[test]
+    fn test_very_long_type_annotation() {
+        let src = "def complex_processor(\n    data: dict[str, Union[int, str, list[dict[str, Any]]]],\n    validators: list[Callable[[dict[str, Any]], bool]],\n) -> tuple[dict[str, Any], list[str]]:\n    \"\"\"";
+        let ls = lines(src);
+        let cursor_line = ls.len() - 1;
+        let def = find_definition_above(&ls, cursor_line).unwrap();
+        let doc = generate_docstring(&def).unwrap();
+        // Verify the long types are preserved as-is
+        assert!(doc.contains("data (dict[str, Union[int, str, list[dict[str, Any]]]])"));
+        assert!(doc.contains("validators (list[Callable[[dict[str, Any]], bool]])"));
+        assert!(doc.contains("Returns:"));
+        assert!(doc.contains("tuple[dict[str, Any], list[str]]"));
+    }
+
+    #[test]
+    fn test_multiple_type_parameters() {
+        let src = "def transform_dict(data: Dict[K, V], transformer: Callable[[V], V]) -> Dict[K, V]:\n    \"\"\"";
+        let ls = lines(src);
+        let cursor_line = ls.len() - 1;
+        let def = find_definition_above(&ls, cursor_line).unwrap();
+        let doc = generate_docstring(&def).unwrap();
+        assert!(doc.contains("data (Dict[K, V])"));
+        assert!(doc.contains("transformer (Callable[[V], V])"));
+        assert!(doc.contains("Returns:"));
+        assert!(doc.contains("Dict[K, V]"));
+    }
+
+    #[test]
+    fn test_literal_type() {
+        let src = r#"def set_mode(mode: Literal["read", "write", "append"]) -> None:
+    """"#;
+        let ls = lines(src);
+        let cursor_line = ls.len() - 1;
+        let def = find_definition_above(&ls, cursor_line).unwrap();
+        let doc = generate_docstring(&def).unwrap();
+        assert!(doc.contains(r#"mode (Literal["read", "write", "append"])"#));
+        assert!(!doc.contains("Returns:")); // None return should be omitted
+    }
+
+    #[test]
+    fn test_nested_callable() {
+        let src = "def higher_order_function(\n    func: Callable[[Callable[[int], str]], list[str]],\n) -> Callable[[int], str]:\n    \"\"\"";
+        let ls = lines(src);
+        let cursor_line = ls.len() - 1;
+        let def = find_definition_above(&ls, cursor_line).unwrap();
+        let doc = generate_docstring(&def).unwrap();
+        assert!(doc.contains("func (Callable[[Callable[[int], str]], list[str]])"));
+        assert!(doc.contains("Returns:"));
+        assert!(doc.contains("Callable[[int], str]"));
+    }
+
+    #[test]
+    fn test_union_with_many_types() {
+        let src = "def multi_type_handler(\n    value: Union[str, int, float, bool, list, dict, None],\n) -> Union[str, int, float, bool, list, dict, None]:\n    \"\"\"";
+        let ls = lines(src);
+        let cursor_line = ls.len() - 1;
+        let def = find_definition_above(&ls, cursor_line).unwrap();
+        let doc = generate_docstring(&def).unwrap();
+        assert!(doc.contains("value (Union[str, int, float, bool, list, dict, None])"));
+        assert!(doc.contains("Returns:"));
+        assert!(doc.contains("Union[str, int, float, bool, list, dict, None]"));
+    }
+
+    #[test]
+    fn test_complex_nested_optional_union() {
+        let src = "def parse_config(\n    config: Optional[Union[str, dict[str, Union[str, int, list[str]]]]] = None,\n) -> dict[str, Any]:\n    \"\"\"";
+        let ls = lines(src);
+        let cursor_line = ls.len() - 1;
+        let def = find_definition_above(&ls, cursor_line).unwrap();
+        let doc = generate_docstring(&def).unwrap();
+        assert!(doc.contains("config (Optional[Union[str, dict[str, Union[str, int, list[str]]]]])"));
+        assert!(doc.contains("Returns:"));
+        assert!(doc.contains("dict[str, Any]"));
+    }
 }
