@@ -77,9 +77,13 @@ pub fn find_definition_above(lines: &[&str], cursor_line: usize) -> Option<Strin
 
 /// Parse the definition source and generate a PEP 257 docstring body.
 /// Returns `None` if the source can't be parsed.
-pub fn generate_docstring(definition_source: &str) -> Option<String> {
+pub fn generate_docstring(definition_source: &str, all_lines: &[&str], cursor_line: usize) -> Option<String> {
     PARSER.with(|cell| -> Option<String> {
         let mut parser = cell.borrow_mut();
+
+        // Try to get the actual function body from lines below cursor
+        // to detect if there are any raise statements
+        let has_raises = check_for_raises(&mut parser, all_lines, cursor_line);
 
         // Append a dummy body so tree-sitter sees a complete function/class node
         let full_source = format!("{}\n    pass", definition_source);
@@ -90,13 +94,13 @@ pub fn generate_docstring(definition_source: &str) -> Option<String> {
         let node = first_def_node(root, full_source.as_bytes())?;
 
         match node.kind() {
-            "function_definition" => build_function_docstring(node, full_source.as_bytes()),
+            "function_definition" => build_function_docstring(node, full_source.as_bytes(), has_raises),
             "class_definition" => build_class_docstring(node, full_source.as_bytes()),
             "decorated_definition" => {
                 let inner = node.child_by_field_name("definition")?;
                 match inner.kind() {
                     "function_definition" => {
-                        build_function_docstring(inner, full_source.as_bytes())
+                        build_function_docstring(inner, full_source.as_bytes(), has_raises)
                     }
                     "class_definition" => build_class_docstring(inner, full_source.as_bytes()),
                     _ => None,
@@ -127,6 +131,69 @@ fn first_def_node<'a>(node: Node<'a>, src: &[u8]) -> Option<Node<'a>> {
 
 fn node_text<'a>(node: Node, src: &'a [u8]) -> &'a str {
     std::str::from_utf8(&src[node.byte_range()]).unwrap_or("")
+}
+
+/// Check if the function body contains any raise statements by parsing with tree-sitter
+fn check_for_raises(parser: &mut tree_sitter::Parser, all_lines: &[&str], cursor_line: usize) -> bool {
+    // Get the function indentation level
+    if cursor_line == 0 || cursor_line >= all_lines.len() {
+        return false;
+    }
+
+    let def_line = all_lines.get(cursor_line.saturating_sub(1)).unwrap_or(&"");
+    let def_indent = def_line.len() - def_line.trim_start().len();
+
+    // Collect lines that are part of the function body (after the docstring cursor)
+    let mut body_lines = Vec::new();
+    for i in (cursor_line + 1)..all_lines.len() {
+        let line = all_lines[i];
+        let trimmed = line.trim_start();
+
+        // Skip empty lines and comments
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            body_lines.push(line);
+            continue;
+        }
+
+        let line_indent = line.len() - trimmed.len();
+
+        // If we're back at or before the function def indentation, we've left the function body
+        if line_indent <= def_indent {
+            break;
+        }
+
+        body_lines.push(line);
+    }
+
+    if body_lines.is_empty() {
+        return false;
+    }
+
+    // Parse the function body
+    let body_text = body_lines.join("\n");
+    let tree = match parser.parse(&body_text, None) {
+        Some(t) => t,
+        None => return false,
+    };
+
+    // Walk the AST looking for raise_statement nodes
+    has_raise_statement(tree.root_node())
+}
+
+/// Recursively check if a node or any of its descendants is a raise_statement
+fn has_raise_statement(node: Node) -> bool {
+    if node.kind() == "raise_statement" {
+        return true;
+    }
+
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        if has_raise_statement(child) {
+            return true;
+        }
+    }
+
+    false
 }
 
 // -- Docstring builders --
@@ -175,7 +242,7 @@ fn append_args_section(
     }
 }
 
-fn build_function_docstring(node: Node, src: &[u8]) -> Option<String> {
+fn build_function_docstring(node: Node, src: &[u8], has_raises: bool) -> Option<String> {
     let params_node = node.child_by_field_name("parameters")?;
     let return_node = node.child_by_field_name("return_type");
 
@@ -198,7 +265,19 @@ fn build_function_docstring(node: Node, src: &[u8]) -> Option<String> {
             lines.push(String::new());
             lines.push("Returns:".to_string());
             lines.push(format!("    {}: ${{{}:Description.}}", ret, counter));
+            counter += 1;
         }
+    }
+
+    // Add Raises section if we detected raise statements
+    if has_raises {
+        lines.push(String::new());
+        lines.push("Raises:".to_string());
+        lines.push(format!(
+            "    ${{{}:ExceptionType}}: ${{{}:Description.}}",
+            counter,
+            counter + 1
+        ));
     }
 
     Some(lines.join("\n"))
@@ -309,7 +388,7 @@ mod tests {
         let ls = lines(src);
         let cursor_line = ls.len() - 1; // Position of the """ line
         let def = find_definition_above(&ls, cursor_line).unwrap();
-        let doc = generate_docstring(&def).unwrap();
+        let doc = generate_docstring(&def, &ls, cursor_line).unwrap();
         assert!(doc.contains("name (str)"));
         assert!(doc.contains("times (int)"));
         assert!(doc.contains("Returns:"));
@@ -322,7 +401,7 @@ mod tests {
         let ls = lines(src);
         let cursor_line = ls.len() - 1;
         let def = find_definition_above(&ls, cursor_line).unwrap();
-        let doc = generate_docstring(&def).unwrap();
+        let doc = generate_docstring(&def, &ls, cursor_line).unwrap();
         assert!(doc.contains("a (${"));
         assert!(doc.contains("b (${"));
     }
@@ -333,7 +412,7 @@ mod tests {
         let ls = lines(src);
         let cursor_line = ls.len() - 1;
         let def = find_definition_above(&ls, cursor_line).unwrap();
-        let doc = generate_docstring(&def).unwrap();
+        let doc = generate_docstring(&def, &ls, cursor_line).unwrap();
         assert!(!doc.contains("self"));
         assert!(doc.contains("path (str)"));
     }
@@ -344,7 +423,7 @@ mod tests {
         let ls = lines(src);
         let cursor_line = ls.len() - 1;
         let def = find_definition_above(&ls, cursor_line).unwrap();
-        let doc = generate_docstring(&def).unwrap();
+        let doc = generate_docstring(&def, &ls, cursor_line).unwrap();
         assert!(!doc.contains("Returns:"));
     }
 
@@ -354,7 +433,7 @@ mod tests {
         let ls = lines(src);
         let cursor_line = ls.len() - 1;
         let def = find_definition_above(&ls, cursor_line).unwrap();
-        let doc = generate_docstring(&def).unwrap();
+        let doc = generate_docstring(&def, &ls, cursor_line).unwrap();
         assert!(doc.contains("${1")); // has summary placeholder
     }
 
@@ -364,7 +443,7 @@ mod tests {
         let ls = lines(src);
         let cursor_line = ls.len() - 1;
         let def = find_definition_above(&ls, cursor_line).unwrap();
-        let doc = generate_docstring(&def).unwrap();
+        let doc = generate_docstring(&def, &ls, cursor_line).unwrap();
         assert!(doc.contains("a (int)"));
         assert!(doc.contains("b (str)"));
         assert!(doc.contains("Returns:"));
@@ -374,7 +453,8 @@ mod tests {
     fn test_class_with_init_args() {
         // Per PEP 257, class docstrings should not include __init__ args
         let src = "class Point:\n    def __init__(self, x: float, y: float):\n        pass";
-        let doc = generate_docstring(src).unwrap();
+        let ls = lines(src);
+        let doc = generate_docstring(src, &ls, 0).unwrap();
         assert!(doc.contains("${1")); // has summary placeholder
         assert!(!doc.contains("x (")); // should NOT contain __init__ args
         assert!(!doc.contains("Args:"));
@@ -387,7 +467,7 @@ mod tests {
         let ls = lines(src);
         let cursor_line = ls.len() - 1;
         let def = find_definition_above(&ls, cursor_line).unwrap();
-        let doc = generate_docstring(&def).unwrap();
+        let doc = generate_docstring(&def, &ls, cursor_line).unwrap();
         assert!(doc.contains("x (float)"));
         assert!(doc.contains("y (float)"));
         assert!(!doc.contains("self")); // self should be skipped
@@ -402,7 +482,7 @@ mod tests {
         let ls = lines(src);
         let cursor_line = ls.len() - 1;
         let def = find_definition_above(&ls, cursor_line).unwrap();
-        let doc = generate_docstring(&def).unwrap();
+        let doc = generate_docstring(&def, &ls, cursor_line).unwrap();
         assert!(doc.contains("value (Union[str, int])"));
         assert!(doc.contains("default (Union[str, int])"));
         assert!(doc.contains("Returns:"));
@@ -415,7 +495,7 @@ mod tests {
         let ls = lines(src);
         let cursor_line = ls.len() - 1;
         let def = find_definition_above(&ls, cursor_line).unwrap();
-        let doc = generate_docstring(&def).unwrap();
+        let doc = generate_docstring(&def, &ls, cursor_line).unwrap();
         assert!(doc.contains("value (str | int)"));
         assert!(doc.contains("default (str | int)"));
         assert!(doc.contains("Returns:"));
@@ -428,7 +508,7 @@ mod tests {
         let ls = lines(src);
         let cursor_line = ls.len() - 1;
         let def = find_definition_above(&ls, cursor_line).unwrap();
-        let doc = generate_docstring(&def).unwrap();
+        let doc = generate_docstring(&def, &ls, cursor_line).unwrap();
         assert!(doc.contains("user_id (int)"));
         assert!(doc.contains("cache (Optional[dict])"));
         assert!(doc.contains("Returns:"));
@@ -441,7 +521,7 @@ mod tests {
         let ls = lines(src);
         let cursor_line = ls.len() - 1;
         let def = find_definition_above(&ls, cursor_line).unwrap();
-        let doc = generate_docstring(&def).unwrap();
+        let doc = generate_docstring(&def, &ls, cursor_line).unwrap();
         assert!(doc.contains("callback (Callable[[int, str], bool])"));
         assert!(doc.contains("fallback (Callable[[str], None])"));
         assert!(!doc.contains("Returns:")); // None return should be omitted
@@ -453,7 +533,7 @@ mod tests {
         let ls = lines(src);
         let cursor_line = ls.len() - 1;
         let def = find_definition_above(&ls, cursor_line).unwrap();
-        let doc = generate_docstring(&def).unwrap();
+        let doc = generate_docstring(&def, &ls, cursor_line).unwrap();
         assert!(doc.contains("data (list[dict[str, Any]])"));
         assert!(doc.contains("overrides (dict[str, list[int]])"));
         assert!(doc.contains("Returns:"));
@@ -466,7 +546,7 @@ mod tests {
         let ls = lines(src);
         let cursor_line = ls.len() - 1;
         let def = find_definition_above(&ls, cursor_line).unwrap();
-        let doc = generate_docstring(&def).unwrap();
+        let doc = generate_docstring(&def, &ls, cursor_line).unwrap();
         assert!(doc.contains("items (List[T])"));
         assert!(doc.contains("default (T)"));
         assert!(doc.contains("Returns:"));
@@ -479,7 +559,7 @@ mod tests {
         let ls = lines(src);
         let cursor_line = ls.len() - 1;
         let def = find_definition_above(&ls, cursor_line).unwrap();
-        let doc = generate_docstring(&def).unwrap();
+        let doc = generate_docstring(&def, &ls, cursor_line).unwrap();
         // Verify the long types are preserved as-is
         assert!(doc.contains("data (dict[str, Union[int, str, list[dict[str, Any]]]])"));
         assert!(doc.contains("validators (list[Callable[[dict[str, Any]], bool]])"));
@@ -493,7 +573,7 @@ mod tests {
         let ls = lines(src);
         let cursor_line = ls.len() - 1;
         let def = find_definition_above(&ls, cursor_line).unwrap();
-        let doc = generate_docstring(&def).unwrap();
+        let doc = generate_docstring(&def, &ls, cursor_line).unwrap();
         assert!(doc.contains("data (Dict[K, V])"));
         assert!(doc.contains("transformer (Callable[[V], V])"));
         assert!(doc.contains("Returns:"));
@@ -507,7 +587,7 @@ mod tests {
         let ls = lines(src);
         let cursor_line = ls.len() - 1;
         let def = find_definition_above(&ls, cursor_line).unwrap();
-        let doc = generate_docstring(&def).unwrap();
+        let doc = generate_docstring(&def, &ls, cursor_line).unwrap();
         assert!(doc.contains(r#"mode (Literal["read", "write", "append"])"#));
         assert!(!doc.contains("Returns:")); // None return should be omitted
     }
@@ -518,7 +598,7 @@ mod tests {
         let ls = lines(src);
         let cursor_line = ls.len() - 1;
         let def = find_definition_above(&ls, cursor_line).unwrap();
-        let doc = generate_docstring(&def).unwrap();
+        let doc = generate_docstring(&def, &ls, cursor_line).unwrap();
         assert!(doc.contains("func (Callable[[Callable[[int], str]], list[str]])"));
         assert!(doc.contains("Returns:"));
         assert!(doc.contains("Callable[[int], str]"));
@@ -530,7 +610,7 @@ mod tests {
         let ls = lines(src);
         let cursor_line = ls.len() - 1;
         let def = find_definition_above(&ls, cursor_line).unwrap();
-        let doc = generate_docstring(&def).unwrap();
+        let doc = generate_docstring(&def, &ls, cursor_line).unwrap();
         assert!(doc.contains("value (Union[str, int, float, bool, list, dict, None])"));
         assert!(doc.contains("Returns:"));
         assert!(doc.contains("Union[str, int, float, bool, list, dict, None]"));
@@ -542,7 +622,7 @@ mod tests {
         let ls = lines(src);
         let cursor_line = ls.len() - 1;
         let def = find_definition_above(&ls, cursor_line).unwrap();
-        let doc = generate_docstring(&def).unwrap();
+        let doc = generate_docstring(&def, &ls, cursor_line).unwrap();
         assert!(doc.contains("config (Optional[Union[str, dict[str, Union[str, int, list[str]]]]])"));
         assert!(doc.contains("Returns:"));
         assert!(doc.contains("dict[str, Any]"));
@@ -556,7 +636,7 @@ mod tests {
         let ls = lines(src);
         let cursor_line = ls.len() - 1;
         let def = find_definition_above(&ls, cursor_line).unwrap();
-        let doc = generate_docstring(&def).unwrap();
+        let doc = generate_docstring(&def, &ls, cursor_line).unwrap();
         assert!(doc.contains("x (int)"));
         assert!(doc.contains("Returns:"));
         assert!(doc.contains("str"));
@@ -568,7 +648,7 @@ mod tests {
         let ls = lines(src);
         let cursor_line = ls.len() - 1;
         let def = find_definition_above(&ls, cursor_line).unwrap();
-        let doc = generate_docstring(&def).unwrap();
+        let doc = generate_docstring(&def, &ls, cursor_line).unwrap();
         // Should document the inner function, not the outer
         assert!(doc.contains("x (float)"));
         assert!(doc.contains("y (bool)"));
@@ -584,7 +664,7 @@ mod tests {
         let ls = lines(src);
         let cursor_line = ls.len() - 1;
         let def = find_definition_above(&ls, cursor_line).unwrap();
-        let doc = generate_docstring(&def).unwrap();
+        let doc = generate_docstring(&def, &ls, cursor_line).unwrap();
         assert!(doc.contains("z (dict)"));
         assert!(!doc.contains("Returns:")); // None should be omitted
     }
@@ -595,7 +675,7 @@ mod tests {
         let ls = lines(src);
         let cursor_line = ls.len() - 1;
         let def = find_definition_above(&ls, cursor_line).unwrap();
-        let doc = generate_docstring(&def).unwrap();
+        let doc = generate_docstring(&def, &ls, cursor_line).unwrap();
         assert!(doc.contains("x (int)"));
         assert!(doc.contains("y (str)"));
         assert!(doc.contains("Returns:"));
@@ -608,7 +688,7 @@ mod tests {
         let ls = lines(src);
         let cursor_line = ls.len() - 1;
         let def = find_definition_above(&ls, cursor_line).unwrap();
-        let doc = generate_docstring(&def).unwrap();
+        let doc = generate_docstring(&def, &ls, cursor_line).unwrap();
         assert!(doc.contains("url (str)"));
         assert!(doc.contains("Returns:"));
         assert!(doc.contains("dict"));
@@ -620,9 +700,107 @@ mod tests {
         let ls = lines(src);
         let cursor_line = ls.len() - 1;
         let def = find_definition_above(&ls, cursor_line).unwrap();
-        let doc = generate_docstring(&def).unwrap();
+        let doc = generate_docstring(&def, &ls, cursor_line).unwrap();
         assert!(doc.contains("data (list[dict[str, Any]])"));
         assert!(doc.contains("Returns:"));
         assert!(doc.contains("Optional[str]"));
+    }
+
+    // -- Raises Section Tests --
+
+    #[test]
+    fn test_function_with_raise() {
+        let src = "def divide(a: int, b: int) -> float:\n    \"\"\"\n    if b == 0:\n        raise ZeroDivisionError(\"Cannot divide by zero\")";
+        let ls = lines(src);
+        let cursor_line = 1; // Position of the """ line
+        let def = find_definition_above(&ls, cursor_line).unwrap();
+        let doc = generate_docstring(&def, &ls, cursor_line).unwrap();
+        assert!(doc.contains("a (int)"));
+        assert!(doc.contains("b (int)"));
+        assert!(doc.contains("Returns:"));
+        assert!(doc.contains("float"));
+        assert!(doc.contains("Raises:"));
+        assert!(doc.contains("ExceptionType"));
+    }
+
+    #[test]
+    fn test_function_without_raise() {
+        let src = "def add(a: int, b: int) -> int:\n    \"\"\"\n    return a + b";
+        let ls = lines(src);
+        let cursor_line = 1;
+        let def = find_definition_above(&ls, cursor_line).unwrap();
+        let doc = generate_docstring(&def, &ls, cursor_line).unwrap();
+        assert!(doc.contains("a (int)"));
+        assert!(doc.contains("b (int)"));
+        assert!(doc.contains("Returns:"));
+        assert!(!doc.contains("Raises:")); // Should NOT have Raises section
+    }
+
+    #[test]
+    fn test_function_with_multiple_raises() {
+        let src = "def process(data: str) -> dict:\n    \"\"\"\n    if not data:\n        raise ValueError(\"Empty data\")\n    if len(data) > 100:\n        raise RuntimeError(\"Too large\")";
+        let ls = lines(src);
+        let cursor_line = 1;
+        let def = find_definition_above(&ls, cursor_line).unwrap();
+        let doc = generate_docstring(&def, &ls, cursor_line).unwrap();
+        assert!(doc.contains("data (str)"));
+        assert!(doc.contains("Returns:"));
+        assert!(doc.contains("Raises:"));
+    }
+
+    #[test]
+    fn test_raises_with_no_return() {
+        let src = "def validate(value: int) -> None:\n    \"\"\"\n    if value < 0:\n        raise ValueError(\"Must be positive\")";
+        let ls = lines(src);
+        let cursor_line = 1;
+        let def = find_definition_above(&ls, cursor_line).unwrap();
+        let doc = generate_docstring(&def, &ls, cursor_line).unwrap();
+        assert!(doc.contains("value (int)"));
+        assert!(!doc.contains("Returns:")); // None return omitted
+        assert!(doc.contains("Raises:")); // But Raises is present
+    }
+
+    #[test]
+    fn test_nested_function_with_raise() {
+        let src = "def outer():\n    def inner(x: int) -> str:\n        \"\"\"\n        if x < 0:\n            raise ValueError(\"Negative\")";
+        let ls = lines(src);
+        let cursor_line = 2;
+        let def = find_definition_above(&ls, cursor_line).unwrap();
+        let doc = generate_docstring(&def, &ls, cursor_line).unwrap();
+        assert!(doc.contains("x (int)"));
+        assert!(doc.contains("Raises:"));
+    }
+
+    #[test]
+    fn test_raise_in_string_not_detected() {
+        // The word "raise" in a string should NOT trigger Raises section
+        let src = "def message() -> str:\n    \"\"\"\n    return \"raise the flag\"";
+        let ls = lines(src);
+        let cursor_line = 1;
+        let def = find_definition_above(&ls, cursor_line).unwrap();
+        let doc = generate_docstring(&def, &ls, cursor_line).unwrap();
+        assert!(!doc.contains("Raises:")); // Should NOT have Raises section
+    }
+
+    #[test]
+    fn test_raise_in_comment_not_detected() {
+        // The word "raise" in a comment should NOT trigger Raises section
+        let src = "def process() -> None:\n    \"\"\"\n    # TODO: raise an exception later\n    pass";
+        let ls = lines(src);
+        let cursor_line = 1;
+        let def = find_definition_above(&ls, cursor_line).unwrap();
+        let doc = generate_docstring(&def, &ls, cursor_line).unwrap();
+        assert!(!doc.contains("Raises:")); // Should NOT have Raises section
+    }
+
+    #[test]
+    fn test_raise_in_try_except() {
+        // Actual raise statement in try/except block should be detected
+        let src = "def handle() -> None:\n    \"\"\"\n    try:\n        pass\n    except Exception:\n        raise RuntimeError(\"Failed\")";
+        let ls = lines(src);
+        let cursor_line = 1;
+        let def = find_definition_above(&ls, cursor_line).unwrap();
+        let doc = generate_docstring(&def, &ls, cursor_line).unwrap();
+        assert!(doc.contains("Raises:")); // Should have Raises section
     }
 }

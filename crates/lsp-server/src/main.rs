@@ -114,7 +114,8 @@ impl LanguageServer for Backend {
         };
 
         // Build the PEP 257 docstring body
-        let Some(body) = docgen::generate_docstring(&def_source) else {
+        // Pass all lines so we can look for raise statements in the function body
+        let Some(body) = docgen::generate_docstring(&def_source, &lines, cursor_line) else {
             return Ok(None);
         };
 
