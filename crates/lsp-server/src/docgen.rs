@@ -50,21 +50,22 @@ pub fn find_definition_above(lines: &[&str], cursor_line: usize) -> Option<Strin
         }
     }
 
-    let start = start?;
+    let mut start = start?;
 
-    // For functions: collect from the def line up to cursor_line.
-    if !is_class {
-        let source = lines[start..cursor_line].join("\n");
-        // Must end with `:` — rejects stray defs separated from the cursor by a body.
-        if !source.trim_end().ends_with(':') {
-            return None;
+    // Check for decorators above the def/class line
+    while start > 0 {
+        let prev_line = lines[start - 1].trim_start();
+        if prev_line.starts_with('@') {
+            start -= 1;
+        } else if prev_line.is_empty() {
+            // Skip empty lines between decorators
+            start -= 1;
+        } else {
+            break;
         }
-        return Some(source);
     }
 
-    // For classes: just capture the class header (up to cursor_line)
-    // Per PEP 257, __init__ parameters should be documented in __init__'s
-    // own docstring, not in the class docstring.
+    // Collect from the start (possibly including decorators) up to cursor_line
     let source = lines[start..cursor_line].join("\n");
 
     // Must end with `:` — rejects stray defs separated from the cursor by a body.
@@ -95,14 +96,17 @@ pub fn generate_docstring(definition_source: &str, all_lines: &[&str], cursor_li
 
         match node.kind() {
             "function_definition" => build_function_docstring(node, full_source.as_bytes(), has_raises),
-            "class_definition" => build_class_docstring(node, full_source.as_bytes()),
+            "class_definition" => build_class_docstring(node, full_source.as_bytes(), None, all_lines, cursor_line),
             "decorated_definition" => {
                 let inner = node.child_by_field_name("definition")?;
                 match inner.kind() {
                     "function_definition" => {
                         build_function_docstring(inner, full_source.as_bytes(), has_raises)
                     }
-                    "class_definition" => build_class_docstring(inner, full_source.as_bytes()),
+                    "class_definition" => {
+                        // Pass the parent decorated_definition node so we can check decorators
+                        build_class_docstring(inner, full_source.as_bytes(), Some(node), all_lines, cursor_line)
+                    }
                     _ => None,
                 }
             }
@@ -283,10 +287,168 @@ fn build_function_docstring(node: Node, src: &[u8], has_raises: bool) -> Option<
     Some(lines.join("\n"))
 }
 
-fn build_class_docstring(_node: Node, _src: &[u8]) -> Option<String> {
-    // Per PEP 257, class docstrings should describe the class itself,
-    // not document __init__ parameters. Those belong in __init__'s docstring.
-    Some("\n${1:Summary.}".to_string())
+fn build_class_docstring(
+    _node: Node,
+    src: &[u8],
+    parent: Option<Node>,
+    all_lines: &[&str],
+    cursor_line: usize,
+) -> Option<String> {
+    // Check if this is a dataclass by looking at decorators
+    let is_dataclass = parent
+        .map(|p| is_dataclass_decorated(p, src))
+        .unwrap_or(false);
+
+    if is_dataclass {
+        // Generate Attributes section for dataclass fields
+        // Look at lines after cursor to find field definitions
+        let fields = collect_dataclass_fields_from_lines(all_lines, cursor_line);
+        let mut lines: Vec<String> = Vec::new();
+        lines.push("\n${1:Summary.}".to_string());
+
+        if !fields.is_empty() {
+            lines.push(String::new());
+            lines.push("Attributes:".to_string());
+            let mut counter: u32 = 2;
+            for (name, annotation, default) in fields {
+                lines.push(format_field_line(
+                    &name,
+                    annotation.as_deref(),
+                    default.as_deref(),
+                    &mut counter,
+                ));
+            }
+        }
+
+        Some(lines.join("\n"))
+    } else {
+        // Per PEP 257, regular class docstrings should describe the class itself,
+        // not document __init__ parameters. Those belong in __init__'s docstring.
+        Some("\n${1:Summary.}".to_string())
+    }
+}
+
+// -- Dataclass helpers --
+
+/// Check if a decorated_definition node has @dataclass decorator
+fn is_dataclass_decorated(decorated_node: Node, src: &[u8]) -> bool {
+    let mut cursor = decorated_node.walk();
+    for child in decorated_node.children(&mut cursor) {
+        if child.kind() == "decorator" {
+            let text = node_text(child, src);
+            // Match @dataclass or @dataclasses.dataclass
+            if text.contains("dataclass") {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// Collect dataclass fields by scanning lines after the cursor
+/// Returns (name, type_annotation, default_value) for each field
+fn collect_dataclass_fields_from_lines(
+    all_lines: &[&str],
+    cursor_line: usize,
+) -> Vec<(String, Option<String>, Option<String>)> {
+    let mut fields = Vec::new();
+
+    if cursor_line == 0 || cursor_line >= all_lines.len() {
+        return fields;
+    }
+
+    // Get the class indentation level
+    let class_line = all_lines.get(cursor_line.saturating_sub(1)).unwrap_or(&"");
+    let class_indent = class_line.len() - class_line.trim_start().len();
+
+    // Expected field indentation (one level deeper than class)
+    let field_indent = class_indent + 4;
+
+    // Scan lines after cursor for field definitions
+    for i in (cursor_line + 1)..all_lines.len() {
+        let line = all_lines[i];
+        let trimmed = line.trim_start();
+
+        // Skip empty lines and comments
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+
+        let line_indent = line.len() - trimmed.len();
+
+        // If we're back at or before the class indentation, we've left the class body
+        if line_indent <= class_indent {
+            break;
+        }
+
+        // Only look at lines at the field indentation level
+        if line_indent != field_indent {
+            continue;
+        }
+
+        // Skip methods (def/async def)
+        if trimmed.starts_with("def ") || trimmed.starts_with("async def ") {
+            break;
+        }
+
+        // Parse field definition: name: type = default or name: type
+        if let Some(colon_pos) = trimmed.find(':') {
+            let name = trimmed[..colon_pos].trim().to_string();
+            let rest = &trimmed[colon_pos + 1..];
+
+            // Check for = to separate type from default
+            let (type_str, default_str) = if let Some(eq_pos) = rest.find('=') {
+                (
+                    rest[..eq_pos].trim(),
+                    Some(rest[eq_pos + 1..].trim().to_string()),
+                )
+            } else {
+                (rest.trim(), None)
+            };
+
+            let annotation = if !type_str.is_empty() {
+                Some(type_str.to_string())
+            } else {
+                None
+            };
+
+            // Skip ClassVar and InitVar (they're not instance attributes)
+            if let Some(ref ann) = annotation {
+                if ann.starts_with("ClassVar") || ann.starts_with("InitVar") {
+                    continue;
+                }
+            }
+
+            fields.push((name, annotation, default_str));
+        }
+    }
+
+    fields
+}
+
+/// Format a field line for Attributes section
+fn format_field_line(
+    name: &str,
+    annotation: Option<&str>,
+    default: Option<&str>,
+    counter: &mut u32,
+) -> String {
+    let type_part = if let Some(t) = annotation {
+        format!(" ({})", t)
+    } else {
+        let n = *counter;
+        *counter += 1;
+        format!(" (${{{}:type}})", n)
+    };
+    let default_part = default
+        .map(|d| format!(", optional (default: {})", d))
+        .unwrap_or_default();
+    let desc = *counter;
+    *counter += 1;
+    format!(
+        "    {}{}: ${{{}:Description{}.}}",
+        name, type_part, desc, default_part
+    )
 }
 
 // -- Argument collection --
@@ -802,5 +964,116 @@ mod tests {
         let def = find_definition_above(&ls, cursor_line).unwrap();
         let doc = generate_docstring(&def, &ls, cursor_line).unwrap();
         assert!(doc.contains("Raises:")); // Should have Raises section
+    }
+
+    // -- Dataclass Tests --
+
+    #[test]
+    fn test_basic_dataclass() {
+        let src = "@dataclass\nclass Point:\n    \"\"\"";
+        let ls = lines(src);
+        let cursor_line = 2;
+        let def = find_definition_above(&ls, cursor_line).unwrap();
+        let doc = generate_docstring(&def, &ls, cursor_line).unwrap();
+        assert!(doc.contains("${1:Summary.}"));
+        // No fields defined yet, so no Attributes section
+    }
+
+    #[test]
+    fn test_dataclass_with_fields() {
+        let src = "@dataclass\nclass Point:\n    \"\"\"\n    x: float\n    y: float";
+        let ls = lines(src);
+        let cursor_line = 2;
+        let def = find_definition_above(&ls, cursor_line).unwrap();
+        let doc = generate_docstring(&def, &ls, cursor_line).unwrap();
+        assert!(doc.contains("Attributes:"));
+        assert!(doc.contains("x (float)"));
+        assert!(doc.contains("y (float)"));
+    }
+
+    #[test]
+    fn test_dataclass_with_defaults() {
+        let src = "@dataclass\nclass Person:\n    \"\"\"\n    name: str\n    age: int = 0";
+        let ls = lines(src);
+        let cursor_line = 2;
+        let def = find_definition_above(&ls, cursor_line).unwrap();
+        let doc = generate_docstring(&def, &ls, cursor_line).unwrap();
+        assert!(doc.contains("Attributes:"));
+        assert!(doc.contains("name (str)"));
+        assert!(doc.contains("age (int)"));
+        assert!(doc.contains("default: 0"));
+    }
+
+    #[test]
+    fn test_dataclass_with_optional() {
+        let src = "@dataclass\nclass User:\n    \"\"\"\n    name: str\n    email: Optional[str] = None";
+        let ls = lines(src);
+        let cursor_line = 2;
+        let def = find_definition_above(&ls, cursor_line).unwrap();
+        let doc = generate_docstring(&def, &ls, cursor_line).unwrap();
+        assert!(doc.contains("Attributes:"));
+        assert!(doc.contains("name (str)"));
+        assert!(doc.contains("email (Optional[str])"));
+        assert!(doc.contains("default: None"));
+    }
+
+    #[test]
+    fn test_dataclass_skips_classvar() {
+        let src = "@dataclass\nclass Counter:\n    \"\"\"\n    count: int\n    total: ClassVar[int] = 0";
+        let ls = lines(src);
+        let cursor_line = 2;
+        let def = find_definition_above(&ls, cursor_line).unwrap();
+        let doc = generate_docstring(&def, &ls, cursor_line).unwrap();
+        assert!(doc.contains("Attributes:"));
+        assert!(doc.contains("count (int)"));
+        assert!(!doc.contains("total")); // ClassVar should be skipped
+    }
+
+    #[test]
+    fn test_dataclass_skips_initvar() {
+        let src = "@dataclass\nclass Item:\n    \"\"\"\n    value: int\n    init_param: InitVar[str]";
+        let ls = lines(src);
+        let cursor_line = 2;
+        let def = find_definition_above(&ls, cursor_line).unwrap();
+        let doc = generate_docstring(&def, &ls, cursor_line).unwrap();
+        assert!(doc.contains("Attributes:"));
+        assert!(doc.contains("value (int)"));
+        assert!(!doc.contains("init_param")); // InitVar should be skipped
+    }
+
+    #[test]
+    fn test_dataclass_complex_types() {
+        let src = "@dataclass\nclass Config:\n    \"\"\"\n    data: list[dict[str, Any]]\n    callback: Optional[Callable[[int], str]] = None";
+        let ls = lines(src);
+        let cursor_line = 2;
+        let def = find_definition_above(&ls, cursor_line).unwrap();
+        let doc = generate_docstring(&def, &ls, cursor_line).unwrap();
+        assert!(doc.contains("Attributes:"));
+        assert!(doc.contains("data (list[dict[str, Any]])"));
+        assert!(doc.contains("callback (Optional[Callable[[int], str]])"));
+    }
+
+    #[test]
+    fn test_regular_class_not_dataclass() {
+        // Regular class without @dataclass should not get Attributes section
+        let src = "class Point:\n    \"\"\"";
+        let ls = lines(src);
+        let cursor_line = 1;
+        let def = find_definition_above(&ls, cursor_line).unwrap();
+        let doc = generate_docstring(&def, &ls, cursor_line).unwrap();
+        assert!(!doc.contains("Attributes:")); // Should NOT have Attributes
+        assert!(doc.contains("${1:Summary.}")); // Just summary
+    }
+
+    #[test]
+    fn test_dataclasses_module_decorator() {
+        // Test @dataclasses.dataclass form
+        let src = "@dataclasses.dataclass\nclass Point:\n    \"\"\"\n    x: float\n    y: float";
+        let ls = lines(src);
+        let cursor_line = 2;
+        let def = find_definition_above(&ls, cursor_line).unwrap();
+        let doc = generate_docstring(&def, &ls, cursor_line).unwrap();
+        assert!(doc.contains("Attributes:"));
+        assert!(doc.contains("x (float)"));
     }
 }
