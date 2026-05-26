@@ -76,14 +76,15 @@ impl PythonAutodocExtension {
             env!("CARGO_PKG_VERSION"),
             asset
         );
-        let download_err = match zed::download_file(&url, binary_name, zed::DownloadedFileType::GzipTar) {
-            Ok(()) => {
-                zed::make_file_executable(binary_name)?;
-                self.cached_binary_path = Some(binary_name.to_string());
-                return Ok(binary_name.to_string());
-            }
-            Err(e) => e,
-        };
+        let download_err =
+            match zed::download_file(&url, binary_name, zed::DownloadedFileType::GzipTar) {
+                Ok(()) => {
+                    zed::make_file_executable(binary_name)?;
+                    self.cached_binary_path = Some(binary_name.to_string());
+                    return Ok(binary_name.to_string());
+                }
+                Err(e) => e,
+            };
 
         // Last resort: binary installed globally on PATH.
         if let Some(path) = worktree.which(binary_name) {

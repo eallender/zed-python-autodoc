@@ -15,13 +15,23 @@ struct DocumentStore {
 
 impl DocumentStore {
     fn update(&self, uri: &str, text: String) {
-        self.docs.lock().expect("DocumentStore lock poisoned").insert(uri.to_string(), text);
+        self.docs
+            .lock()
+            .expect("DocumentStore lock poisoned")
+            .insert(uri.to_string(), text);
     }
     fn close(&self, uri: &str) {
-        self.docs.lock().expect("DocumentStore lock poisoned").remove(uri);
+        self.docs
+            .lock()
+            .expect("DocumentStore lock poisoned")
+            .remove(uri);
     }
     fn get(&self, uri: &str) -> Option<String> {
-        self.docs.lock().expect("DocumentStore lock poisoned").get(uri).cloned()
+        self.docs
+            .lock()
+            .expect("DocumentStore lock poisoned")
+            .get(uri)
+            .cloned()
     }
 }
 
@@ -64,14 +74,19 @@ impl LanguageServer for Backend {
     // -- Document sync --
 
     async fn did_open(&self, params: DidOpenTextDocumentParams) {
-        self.store
-            .update(&params.text_document.uri.to_string(), params.text_document.text);
+        self.store.update(
+            &params.text_document.uri.to_string(),
+            params.text_document.text,
+        );
     }
 
     async fn did_change(&self, params: DidChangeTextDocumentParams) {
         if params.content_changes.len() > 1 {
             self.client
-                .log_message(MessageType::WARNING, "python-autodoc: received incremental sync; expected FULL")
+                .log_message(
+                    MessageType::WARNING,
+                    "python-autodoc: received incremental sync; expected FULL",
+                )
                 .await;
         }
         // FULL sync — last change event contains the whole document
@@ -123,23 +138,25 @@ impl LanguageServer for Backend {
         let indent_len = current_line.len() - current_line.trim_start().len();
         let indent = " ".repeat(indent_len);
 
-        // Prefix each non-empty body line with the current indentation so the
-        // snippet lands at the right column regardless of editor auto-indent.
-        let indented_body = body
-            .lines()
-            .map(|line| {
-                if line.is_empty() {
-                    String::new()
-                } else {
-                    format!("{}{}", indent, line)
-                }
-            })
-            .collect::<Vec<_>>()
-            .join("\n");
-
-        // Snippet inserted right after the opening `"""` the user typed.
-        // $1 = summary tab stop; closing `"""` on its own indented line.
-        let snippet = format!("{}\n{}\"\"\"", indented_body, indent);
+        // A body without a leading newline is a PEP 257 one-liner (e.g. class summaries).
+        let snippet = if !body.starts_with('\n') {
+            format!("{}\"\"\"", body)
+        } else {
+            // Prefix each non-empty body line with the current indentation so the
+            // snippet lands at the right column regardless of editor auto-indent.
+            let indented_body = body
+                .lines()
+                .map(|line| {
+                    if line.is_empty() {
+                        String::new()
+                    } else {
+                        format!("{}{}", indent, line)
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            format!("{}\n{}\"\"\"", indented_body, indent)
+        };
 
         // If the editor auto-paired a closing `"""` after the cursor, replace
         // it so we don't end up with `""""""`.

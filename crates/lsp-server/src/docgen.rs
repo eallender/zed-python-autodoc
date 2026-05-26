@@ -1,5 +1,3 @@
-/// docgen.rs
-///
 /// Uses tree-sitter-python to parse function/class definitions and produce
 /// PEP 257-style docstring bodies (without the surrounding triple-quotes —
 /// the LSP layer adds those).
@@ -34,18 +32,15 @@ pub fn find_definition_above(lines: &[&str], cursor_line: usize) -> Option<Strin
         return None;
     }
 
-    // Walk upward (bounded) to find the start of a def/class header.
     let search_from = cursor_line.saturating_sub(MAX_SIGNATURE_LINES);
     let mut start = None;
-    let mut is_class = false;
     for i in (search_from..cursor_line).rev() {
         let stripped = lines[i].trim_start();
-        if stripped.starts_with("def ") || stripped.starts_with("async def ") {
+        if stripped.starts_with("def ")
+            || stripped.starts_with("async def ")
+            || stripped.starts_with("class ")
+        {
             start = Some(i);
-            break;
-        } else if stripped.starts_with("class ") {
-            start = Some(i);
-            is_class = true;
             break;
         }
     }
@@ -58,14 +53,13 @@ pub fn find_definition_above(lines: &[&str], cursor_line: usize) -> Option<Strin
         if prev_line.starts_with('@') {
             start -= 1;
         } else if prev_line.is_empty() {
-            // Skip empty lines between decorators
+            // Blank lines may appear between stacked decorators; keep walking.
             start -= 1;
         } else {
             break;
         }
     }
 
-    // Collect from the start (possibly including decorators) up to cursor_line
     let source = lines[start..cursor_line].join("\n");
 
     // Must end with `:` — rejects stray defs separated from the cursor by a body.
@@ -78,34 +72,44 @@ pub fn find_definition_above(lines: &[&str], cursor_line: usize) -> Option<Strin
 
 /// Parse the definition source and generate a PEP 257 docstring body.
 /// Returns `None` if the source can't be parsed.
-pub fn generate_docstring(definition_source: &str, all_lines: &[&str], cursor_line: usize) -> Option<String> {
+pub fn generate_docstring(
+    definition_source: &str,
+    all_lines: &[&str],
+    cursor_line: usize,
+) -> Option<String> {
     PARSER.with(|cell| -> Option<String> {
         let mut parser = cell.borrow_mut();
 
-        // Try to get the actual function body from lines below cursor
-        // to detect if there are any raise statements
-        let has_raises = check_for_raises(&mut parser, all_lines, cursor_line);
+        let raise_types = collect_raise_types(&mut parser, all_lines, cursor_line);
 
         // Append a dummy body so tree-sitter sees a complete function/class node
         let full_source = format!("{}\n    pass", definition_source);
         let tree = parser.parse(&full_source, None)?;
         let root = tree.root_node();
 
-        // Find the first function_definition, async function_definition, or class_definition
-        let node = first_def_node(root, full_source.as_bytes())?;
+        let node = first_def_node(root)?;
 
         match node.kind() {
-            "function_definition" => build_function_docstring(node, full_source.as_bytes(), has_raises),
-            "class_definition" => build_class_docstring(node, full_source.as_bytes(), None, all_lines, cursor_line),
+            "function_definition" => {
+                build_function_docstring(node, full_source.as_bytes(), raise_types)
+            }
+            "class_definition" => {
+                build_class_docstring(full_source.as_bytes(), None, all_lines, cursor_line)
+            }
             "decorated_definition" => {
                 let inner = node.child_by_field_name("definition")?;
                 match inner.kind() {
                     "function_definition" => {
-                        build_function_docstring(inner, full_source.as_bytes(), has_raises)
+                        build_function_docstring(inner, full_source.as_bytes(), raise_types)
                     }
                     "class_definition" => {
                         // Pass the parent decorated_definition node so we can check decorators
-                        build_class_docstring(inner, full_source.as_bytes(), Some(node), all_lines, cursor_line)
+                        build_class_docstring(
+                            full_source.as_bytes(),
+                            Some(node),
+                            all_lines,
+                            cursor_line,
+                        )
                     }
                     _ => None,
                 }
@@ -117,7 +121,7 @@ pub fn generate_docstring(definition_source: &str, all_lines: &[&str], cursor_li
 
 // -- Tree-sitter helpers --
 
-fn first_def_node<'a>(node: Node<'a>, src: &[u8]) -> Option<Node<'a>> {
+fn first_def_node<'a>(node: Node<'a>) -> Option<Node<'a>> {
     if matches!(
         node.kind(),
         "function_definition" | "class_definition" | "decorated_definition"
@@ -126,7 +130,7 @@ fn first_def_node<'a>(node: Node<'a>, src: &[u8]) -> Option<Node<'a>> {
     }
     let mut cursor = node.walk();
     for child in node.children(&mut cursor) {
-        if let Some(found) = first_def_node(child, src) {
+        if let Some(found) = first_def_node(child) {
             return Some(found);
         }
     }
@@ -137,23 +141,23 @@ fn node_text<'a>(node: Node, src: &'a [u8]) -> &'a str {
     std::str::from_utf8(&src[node.byte_range()]).unwrap_or("")
 }
 
-/// Check if the function body contains any raise statements by parsing with tree-sitter
-fn check_for_raises(parser: &mut tree_sitter::Parser, all_lines: &[&str], cursor_line: usize) -> bool {
-    // Get the function indentation level
+/// Collect unique exception type names from raise statements in the function body.
+fn collect_raise_types(
+    parser: &mut tree_sitter::Parser,
+    all_lines: &[&str],
+    cursor_line: usize,
+) -> Vec<String> {
     if cursor_line == 0 || cursor_line >= all_lines.len() {
-        return false;
+        return vec![];
     }
 
     let def_line = all_lines.get(cursor_line.saturating_sub(1)).unwrap_or(&"");
     let def_indent = def_line.len() - def_line.trim_start().len();
 
-    // Collect lines that are part of the function body (after the docstring cursor)
     let mut body_lines = Vec::new();
-    for i in (cursor_line + 1)..all_lines.len() {
-        let line = all_lines[i];
+    for &line in all_lines[cursor_line + 1..].iter() {
         let trimmed = line.trim_start();
 
-        // Skip empty lines and comments
         if trimmed.is_empty() || trimmed.starts_with('#') {
             body_lines.push(line);
             continue;
@@ -161,7 +165,6 @@ fn check_for_raises(parser: &mut tree_sitter::Parser, all_lines: &[&str], cursor
 
         let line_indent = line.len() - trimmed.len();
 
-        // If we're back at or before the function def indentation, we've left the function body
         if line_indent <= def_indent {
             break;
         }
@@ -170,34 +173,75 @@ fn check_for_raises(parser: &mut tree_sitter::Parser, all_lines: &[&str], cursor
     }
 
     if body_lines.is_empty() {
-        return false;
+        return vec![];
     }
 
-    // Parse the function body
     let body_text = body_lines.join("\n");
     let tree = match parser.parse(&body_text, None) {
         Some(t) => t,
-        None => return false,
+        None => return vec![],
     };
 
-    // Walk the AST looking for raise_statement nodes
-    has_raise_statement(tree.root_node())
+    let mut types: Vec<String> = Vec::new();
+    extract_raise_types(tree.root_node(), body_text.as_bytes(), &mut types, None);
+    types
 }
 
-/// Recursively check if a node or any of its descendants is a raise_statement
-fn has_raise_statement(node: Node) -> bool {
+/// Recursively walk the AST collecting unique exception type names from raise statements.
+/// Does not descend into nested function or class definitions.
+/// `except_context` carries the caught exception type name when inside an `except` clause,
+/// so that a bare `raise` (re-raise) can be attributed to the right type.
+fn extract_raise_types(
+    node: Node,
+    src: &[u8],
+    types: &mut Vec<String>,
+    except_context: Option<String>,
+) {
     if node.kind() == "raise_statement" {
-        return true;
+        if let Some(exc_expr) = node.named_child(0) {
+            let name = match exc_expr.kind() {
+                "call" => exc_expr
+                    .child_by_field_name("function")
+                    .map(|f| node_text(f, src).to_string()),
+                "identifier" | "attribute" => Some(node_text(exc_expr, src).to_string()),
+                _ => None,
+            };
+            if let Some(t) = name {
+                if !types.contains(&t) {
+                    types.push(t);
+                }
+            }
+        } else if let Some(exc_type) = &except_context {
+            // Bare `raise` re-raises the exception from the enclosing `except` clause.
+            if !types.contains(exc_type) {
+                types.push(exc_type.clone());
+            }
+        }
+        return;
     }
+
+    // Raises inside nested functions/classes belong to those scopes, not the outer function.
+    if matches!(
+        node.kind(),
+        "function_definition" | "class_definition" | "decorated_definition"
+    ) {
+        return;
+    }
+
+    // When entering an `except` clause, capture the caught type for any bare `raise` inside it.
+    let new_context = if node.kind() == "except_clause" {
+        node.named_child(0)
+            .filter(|n| matches!(n.kind(), "identifier" | "attribute"))
+            .map(|n| node_text(n, src).to_string())
+            .or_else(|| except_context.clone())
+    } else {
+        except_context.clone()
+    };
 
     let mut cursor = node.walk();
     for child in node.children(&mut cursor) {
-        if has_raise_statement(child) {
-            return true;
-        }
+        extract_raise_types(child, src, types, new_context.clone());
     }
-
-    false
 }
 
 // -- Docstring builders --
@@ -246,7 +290,7 @@ fn append_args_section(
     }
 }
 
-fn build_function_docstring(node: Node, src: &[u8], has_raises: bool) -> Option<String> {
+fn build_function_docstring(node: Node, src: &[u8], raise_types: Vec<String>) -> Option<String> {
     let params_node = node.child_by_field_name("parameters")?;
     let return_node = node.child_by_field_name("return_type");
 
@@ -258,50 +302,55 @@ fn build_function_docstring(node: Node, src: &[u8], has_raises: bool) -> Option<
             .to_string()
     });
 
+    let has_return = return_type
+        .as_deref()
+        .is_some_and(|r| r != "None" && r != "none" && !r.is_empty());
+
+    // One-liner: no args, no return, no raises — mirrors PEP 257 one-liner style.
+    if args.is_empty() && !has_return && raise_types.is_empty() {
+        return Some("${1:Summary.}".to_string());
+    }
+
     let mut lines: Vec<String> = Vec::new();
     lines.push("\n${1:Summary.}".to_string());
 
     let mut counter: u32 = 2;
     append_args_section(&mut lines, &args, &mut counter);
 
-    if let Some(ret) = &return_type {
-        if ret != "None" && ret != "none" && !ret.is_empty() {
-            lines.push(String::new());
-            lines.push("Returns:".to_string());
-            lines.push(format!("    {}: ${{{}:Description.}}", ret, counter));
-            counter += 1;
-        }
+    if has_return {
+        lines.push(String::new());
+        lines.push("Returns:".to_string());
+        lines.push(format!(
+            "    {}: ${{{}:Description.}}",
+            return_type.as_deref().unwrap_or(""),
+            counter
+        ));
+        counter += 1;
     }
 
-    // Add Raises section if we detected raise statements
-    if has_raises {
+    if !raise_types.is_empty() {
         lines.push(String::new());
         lines.push("Raises:".to_string());
-        lines.push(format!(
-            "    ${{{}:ExceptionType}}: ${{{}:Description.}}",
-            counter,
-            counter + 1
-        ));
+        for exc_type in &raise_types {
+            lines.push(format!("    {}: ${{{}:Description.}}", exc_type, counter));
+            counter += 1;
+        }
     }
 
     Some(lines.join("\n"))
 }
 
 fn build_class_docstring(
-    _node: Node,
     src: &[u8],
     parent: Option<Node>,
     all_lines: &[&str],
     cursor_line: usize,
 ) -> Option<String> {
-    // Check if this is a dataclass by looking at decorators
     let is_dataclass = parent
         .map(|p| is_dataclass_decorated(p, src))
         .unwrap_or(false);
 
     if is_dataclass {
-        // Generate Attributes section for dataclass fields
-        // Look at lines after cursor to find field definitions
         let fields = collect_dataclass_fields_from_lines(all_lines, cursor_line);
         let mut lines: Vec<String> = Vec::new();
         lines.push("\n${1:Summary.}".to_string());
@@ -324,13 +373,13 @@ fn build_class_docstring(
     } else {
         // Per PEP 257, regular class docstrings should describe the class itself,
         // not document __init__ parameters. Those belong in __init__'s docstring.
-        Some("\n${1:Summary.}".to_string())
+        // No leading newline signals to the caller to emit an inline one-liner.
+        Some("${1:Summary.}".to_string())
     }
 }
 
 // -- Dataclass helpers --
 
-/// Check if a decorated_definition node has @dataclass decorator
 fn is_dataclass_decorated(decorated_node: Node, src: &[u8]) -> bool {
     let mut cursor = decorated_node.walk();
     for child in decorated_node.children(&mut cursor) {
@@ -345,8 +394,21 @@ fn is_dataclass_decorated(decorated_node: Node, src: &[u8]) -> bool {
     false
 }
 
-/// Collect dataclass fields by scanning lines after the cursor
-/// Returns (name, type_annotation, default_value) for each field
+/// Finds the first `=` at bracket depth 0, skipping `=` inside annotations like `Annotated[int, Field(ge=0)]`.
+fn find_toplevel_eq(s: &str) -> Option<usize> {
+    let mut depth = 0i32;
+    for (i, ch) in s.char_indices() {
+        match ch {
+            '[' | '(' | '{' => depth += 1,
+            ']' | ')' | '}' => depth -= 1,
+            '=' if depth == 0 => return Some(i),
+            _ => {}
+        }
+    }
+    None
+}
+
+/// Returns (name, type_annotation, default_value) for each field in the dataclass body.
 fn collect_dataclass_fields_from_lines(
     all_lines: &[&str],
     cursor_line: usize,
@@ -365,8 +427,7 @@ fn collect_dataclass_fields_from_lines(
     let field_indent = class_indent + 4;
 
     // Scan lines after cursor for field definitions
-    for i in (cursor_line + 1)..all_lines.len() {
-        let line = all_lines[i];
+    for &line in all_lines[cursor_line + 1..].iter() {
         let trimmed = line.trim_start();
 
         // Skip empty lines and comments
@@ -396,8 +457,8 @@ fn collect_dataclass_fields_from_lines(
             let name = trimmed[..colon_pos].trim().to_string();
             let rest = &trimmed[colon_pos + 1..];
 
-            // Check for = to separate type from default
-            let (type_str, default_str) = if let Some(eq_pos) = rest.find('=') {
+            // Check for = to separate type from default (depth-0 to skip `=` inside annotations)
+            let (type_str, default_str) = if let Some(eq_pos) = find_toplevel_eq(rest) {
                 (
                     rest[..eq_pos].trim(),
                     Some(rest[eq_pos + 1..].trim().to_string()),
@@ -558,6 +619,20 @@ mod tests {
     }
 
     #[test]
+    fn test_no_params_no_return_is_oneliner() {
+        let src = "def outer():\n    \"\"\"";
+        let ls = lines(src);
+        let cursor_line = ls.len() - 1;
+        let def = find_definition_above(&ls, cursor_line).unwrap();
+        let doc = generate_docstring(&def, &ls, cursor_line).unwrap();
+        // No args, no return, no raises → one-liner (no leading newline)
+        assert!(!doc.starts_with('\n'));
+        assert!(doc.contains("${1:Summary.}"));
+        assert!(!doc.contains("Args:"));
+        assert!(!doc.contains("Returns:"));
+    }
+
+    #[test]
     fn test_no_annotations() {
         let src = "def add(a, b):\n    \"\"\"";
         let ls = lines(src);
@@ -653,7 +728,8 @@ mod tests {
 
     #[test]
     fn test_union_type_pipe_syntax() {
-        let src = "def process_value(value: str | int, default: str | int = 0) -> str | int:\n    \"\"\"";
+        let src =
+            "def process_value(value: str | int, default: str | int = 0) -> str | int:\n    \"\"\"";
         let ls = lines(src);
         let cursor_line = ls.len() - 1;
         let def = find_definition_above(&ls, cursor_line).unwrap();
@@ -785,7 +861,9 @@ mod tests {
         let cursor_line = ls.len() - 1;
         let def = find_definition_above(&ls, cursor_line).unwrap();
         let doc = generate_docstring(&def, &ls, cursor_line).unwrap();
-        assert!(doc.contains("config (Optional[Union[str, dict[str, Union[str, int, list[str]]]]])"));
+        assert!(
+            doc.contains("config (Optional[Union[str, dict[str, Union[str, int, list[str]]]]])")
+        );
         assert!(doc.contains("Returns:"));
         assert!(doc.contains("dict[str, Any]"));
     }
@@ -882,7 +960,7 @@ mod tests {
         assert!(doc.contains("Returns:"));
         assert!(doc.contains("float"));
         assert!(doc.contains("Raises:"));
-        assert!(doc.contains("ExceptionType"));
+        assert!(doc.contains("ZeroDivisionError"));
     }
 
     #[test]
@@ -908,6 +986,8 @@ mod tests {
         assert!(doc.contains("data (str)"));
         assert!(doc.contains("Returns:"));
         assert!(doc.contains("Raises:"));
+        assert!(doc.contains("ValueError"));
+        assert!(doc.contains("RuntimeError"));
     }
 
     #[test]
@@ -919,7 +999,8 @@ mod tests {
         let doc = generate_docstring(&def, &ls, cursor_line).unwrap();
         assert!(doc.contains("value (int)"));
         assert!(!doc.contains("Returns:")); // None return omitted
-        assert!(doc.contains("Raises:")); // But Raises is present
+        assert!(doc.contains("Raises:"));
+        assert!(doc.contains("ValueError"));
     }
 
     #[test]
@@ -931,6 +1012,7 @@ mod tests {
         let doc = generate_docstring(&def, &ls, cursor_line).unwrap();
         assert!(doc.contains("x (int)"));
         assert!(doc.contains("Raises:"));
+        assert!(doc.contains("ValueError"));
     }
 
     #[test]
@@ -947,12 +1029,36 @@ mod tests {
     #[test]
     fn test_raise_in_comment_not_detected() {
         // The word "raise" in a comment should NOT trigger Raises section
-        let src = "def process() -> None:\n    \"\"\"\n    # TODO: raise an exception later\n    pass";
+        let src =
+            "def process() -> None:\n    \"\"\"\n    # TODO: raise an exception later\n    pass";
         let ls = lines(src);
         let cursor_line = 1;
         let def = find_definition_above(&ls, cursor_line).unwrap();
         let doc = generate_docstring(&def, &ls, cursor_line).unwrap();
         assert!(!doc.contains("Raises:")); // Should NOT have Raises section
+    }
+
+    #[test]
+    fn test_bare_reraise_uses_except_type() {
+        let src = "def wrapper(value: int) -> int:\n    \"\"\"\n    try:\n        return int(value)\n    except ValueError:\n        raise";
+        let ls = lines(src);
+        let cursor_line = 1;
+        let def = find_definition_above(&ls, cursor_line).unwrap();
+        let doc = generate_docstring(&def, &ls, cursor_line).unwrap();
+        assert!(doc.contains("Raises:"));
+        assert!(doc.contains("ValueError"));
+    }
+
+    #[test]
+    fn test_raise_in_nested_function_not_attributed_to_outer() {
+        // The outer function does not raise; the raise is inside a nested function.
+        let src = "def outer(threshold: int):\n    \"\"\"\n    def inner(item: int) -> bool:\n        if item < threshold:\n            raise ValueError(\"below threshold\")\n        return True\n    return inner";
+        let ls = lines(src);
+        let cursor_line = 1;
+        let def = find_definition_above(&ls, cursor_line).unwrap();
+        let doc = generate_docstring(&def, &ls, cursor_line).unwrap();
+        assert!(!doc.contains("Raises:"));
+        assert!(!doc.contains("ValueError"));
     }
 
     #[test]
@@ -963,7 +1069,8 @@ mod tests {
         let cursor_line = 1;
         let def = find_definition_above(&ls, cursor_line).unwrap();
         let doc = generate_docstring(&def, &ls, cursor_line).unwrap();
-        assert!(doc.contains("Raises:")); // Should have Raises section
+        assert!(doc.contains("Raises:"));
+        assert!(doc.contains("RuntimeError"));
     }
 
     // -- Dataclass Tests --
@@ -1006,7 +1113,8 @@ mod tests {
 
     #[test]
     fn test_dataclass_with_optional() {
-        let src = "@dataclass\nclass User:\n    \"\"\"\n    name: str\n    email: Optional[str] = None";
+        let src =
+            "@dataclass\nclass User:\n    \"\"\"\n    name: str\n    email: Optional[str] = None";
         let ls = lines(src);
         let cursor_line = 2;
         let def = find_definition_above(&ls, cursor_line).unwrap();
@@ -1019,7 +1127,8 @@ mod tests {
 
     #[test]
     fn test_dataclass_skips_classvar() {
-        let src = "@dataclass\nclass Counter:\n    \"\"\"\n    count: int\n    total: ClassVar[int] = 0";
+        let src =
+            "@dataclass\nclass Counter:\n    \"\"\"\n    count: int\n    total: ClassVar[int] = 0";
         let ls = lines(src);
         let cursor_line = 2;
         let def = find_definition_above(&ls, cursor_line).unwrap();
@@ -1031,7 +1140,8 @@ mod tests {
 
     #[test]
     fn test_dataclass_skips_initvar() {
-        let src = "@dataclass\nclass Item:\n    \"\"\"\n    value: int\n    init_param: InitVar[str]";
+        let src =
+            "@dataclass\nclass Item:\n    \"\"\"\n    value: int\n    init_param: InitVar[str]";
         let ls = lines(src);
         let cursor_line = 2;
         let def = find_definition_above(&ls, cursor_line).unwrap();
@@ -1075,5 +1185,69 @@ mod tests {
         let doc = generate_docstring(&def, &ls, cursor_line).unwrap();
         assert!(doc.contains("Attributes:"));
         assert!(doc.contains("x (float)"));
+    }
+
+    #[test]
+    fn test_dataclass_annotated_field_with_default() {
+        // Annotated[..., Field(ge=0)] contains `=` inside brackets — must not be
+        // mistaken for the type/default separator.
+        let src =
+            "@dataclass\nclass Validated:\n    \"\"\"\n    score: Annotated[int, Field(ge=0)] = 0";
+        let ls = lines(src);
+        let cursor_line = 2;
+        let def = find_definition_above(&ls, cursor_line).unwrap();
+        let doc = generate_docstring(&def, &ls, cursor_line).unwrap();
+        assert!(doc.contains("Attributes:"));
+        assert!(doc.contains("score (Annotated[int, Field(ge=0)])"));
+        assert!(doc.contains("default: 0"));
+    }
+
+    #[test]
+    fn test_args_kwargs() {
+        let src = "def process(*args, **kwargs):\n    \"\"\"";
+        let ls = lines(src);
+        let cursor_line = ls.len() - 1;
+        let def = find_definition_above(&ls, cursor_line).unwrap();
+        let doc = generate_docstring(&def, &ls, cursor_line).unwrap();
+        assert!(doc.contains("*args"));
+        assert!(doc.contains("**kwargs"));
+        assert!(doc.contains("Args:"));
+    }
+
+    #[test]
+    fn test_skips_cls() {
+        let src = "def create(cls, name: str) -> \"MyClass\":\n    \"\"\"";
+        let ls = lines(src);
+        let cursor_line = ls.len() - 1;
+        let def = find_definition_above(&ls, cursor_line).unwrap();
+        let doc = generate_docstring(&def, &ls, cursor_line).unwrap();
+        assert!(!doc.contains("cls"));
+        assert!(doc.contains("name (str)"));
+    }
+
+    #[test]
+    fn test_top_level_async_def() {
+        let src = "async def fetch(url: str, timeout: int = 30) -> dict:\n    \"\"\"";
+        let ls = lines(src);
+        let cursor_line = ls.len() - 1;
+        let def = find_definition_above(&ls, cursor_line).unwrap();
+        let doc = generate_docstring(&def, &ls, cursor_line).unwrap();
+        assert!(doc.contains("url (str)"));
+        assert!(doc.contains("timeout (int)"));
+        assert!(doc.contains("Returns:"));
+        assert!(doc.contains("dict"));
+    }
+
+    #[test]
+    fn test_keyword_only_params() {
+        let src = "def configure(host: str, *, port: int = 8080, debug: bool = False) -> None:\n    \"\"\"";
+        let ls = lines(src);
+        let cursor_line = ls.len() - 1;
+        let def = find_definition_above(&ls, cursor_line).unwrap();
+        let doc = generate_docstring(&def, &ls, cursor_line).unwrap();
+        assert!(doc.contains("host (str)"));
+        assert!(doc.contains("port (int)"));
+        assert!(doc.contains("debug (bool)"));
+        assert!(!doc.contains("Returns:")); // None return omitted
     }
 }
