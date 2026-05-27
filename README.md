@@ -1,65 +1,12 @@
 # Python Autodoc for Zed
 
-A Zed extension that automatically generates PEP 257-compliant docstrings for Python functions and classes.
+Generates PEP 257 docstrings for Python functions and classes. Type `"""` on the line after a definition to trigger completion.
 
-## Features
+Handles typed parameters, return types, exceptions, dataclasses, async functions, `*args`/`**kwargs`, and nested functions.
 
-- **Smart Docstring Generation**: Type `"""` after a function or class definition to trigger auto-completion
-- **PEP 257 Compliant**: Follows Python's official docstring conventions
-- **Type Hint Support**: Automatically extracts type annotations from function signatures
-- **Snippet Integration**: Generated docstrings include tab stops for easy editing
-- **Works with**:
-  - Functions (sync and async)
-  - Methods (instance, class, and static)
-  - Classes
-  - Multi-line function signatures
-  - Default parameters
-  - `*args` and `**kwargs`
+## Examples
 
-## Development Installation
-
-1. Clone this repository:
-   ```bash
-   git clone https://github.com/eallender/zed-python-autodoc.git
-   cd zed-python-autodoc
-   ```
-
-2. Build the extension and LSP server:
-   ```bash
-   # Build the WASM extension
-   cargo build --release --target wasm32-wasip1
-
-   # Build the LSP server
-   cd crates/lsp-server
-   cargo build --release
-   cd ../..
-   ```
-
-3. Install as dev extension in Zed:
-   - Open Zed
-   - Press `Cmd+Shift+P` / `Ctrl+Shift+P`
-   - Select "zed: install dev extension"
-   - Navigate to this repository directory
-
-## Usage
-
-1. Open a Python file in Zed
-2. Position your cursor right after a function or class definition (after the `:`)
-3. Type `"""` (three double quotes)
-4. Accept the completion to generate a docstring with:
-   - `${1:Summary.}` placeholder (press Tab to edit)
-   - **Args:** section for function parameters (if any)
-   - **Returns:** section for return types (if not `None`)
-
-### Example
-
-**Before:**
-```python
-def greet(name: str, greeting: str = "Hello") -> str:
-    """
-```
-
-**After accepting completion:**
+**Function with typed parameters:**
 ```python
 def greet(name: str, greeting: str = "Hello") -> str:
     """
@@ -67,21 +14,56 @@ def greet(name: str, greeting: str = "Hello") -> str:
 
     Args:
         name (str): Description.
-        greeting (str), optional (default: "Hello"): Description.
+        greeting (str): Description, optional (default: "Hello").
 
     Returns:
         str: Description.
     """
 ```
 
-### PEP 257 Compliance
+**Function with exceptions:**
+```python
+def divide(a: float, b: float) -> float:
+    """
+    Summary.
 
-The extension follows [PEP 257](https://peps.python.org/pep-0257/) conventions:
+    Args:
+        a (float): Description.
+        b (float): Description.
 
-- **Class docstrings**: Summary only (describes the class purpose)
-- **Method/Function docstrings**: Summary + Args + Returns
-- **`__init__` docstrings**: Constructor parameters are documented in the `__init__` method's docstring
+    Returns:
+        float: Description.
+
+    Raises:
+        ZeroDivisionError: Description.
+    """
+    if b == 0:
+        raise ZeroDivisionError("Cannot divide by zero")
+    return a / b
+```
+
+**Dataclass:**
+```python
+@dataclass
+class Point:
+    """
+    Summary.
+
+    Attributes:
+        x (float): Description.
+        y (float): Description.
+    """
+    x: float
+    y: float
+```
+
+More examples can be found in [examples/](examples/).
+
+PEP 257 notes:
+- Class docstrings get a summary only; `__init__` parameters are documented in `__init__`
+- `None` return types are omitted
+- `Raises:` is only generated when the function body contains `raise` statements
 
 ## License
 
-MIT License - see [LICENSE](LICENSE) for details.
+MIT — see [LICENSE](LICENSE).
