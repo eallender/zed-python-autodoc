@@ -1,65 +1,32 @@
 # Python Autodoc for Zed
 
+---
+
 Generates PEP 257 docstrings for Python functions and classes. Type `"""` on the line after a definition to trigger completion.
 
 Handles typed parameters, return types, exceptions, dataclasses, async functions, `*args`/`**kwargs`, and nested functions.
 
 ## Examples
 
-**Function with typed parameters:**
-```python
-def greet(name: str, greeting: str = "Hello") -> str:
-    """
-    Summary.
+1. **Function with typed parameters**
 
-    Args:
-        name (str): Description.
-        greeting (str): Description, optional (default: "Hello").
+![Basic Example](assets/standard.gif)   
 
-    Returns:
-        str: Description.
-    """
-```
+2. **Function with exceptions**
 
-**Function with exceptions:**
-```python
-def divide(a: float, b: float) -> float:
-    """
-    Summary.
+![Exception Example](assets/raises.gif)   
 
-    Args:
-        a (float): Description.
-        b (float): Description.
+3. **Dataclasses**
 
-    Returns:
-        float: Description.
+![Basic Example](assets/dataclass.gif)
 
-    Raises:
-        ZeroDivisionError: Description.
-    """
-    if b == 0:
-        raise ZeroDivisionError("Cannot divide by zero")
-    return a / b
-```
+4. **Complex signatures**
 
-**Dataclass:**
-```python
-@dataclass
-class Point:
-    """
-    Summary.
-
-    Attributes:
-        x (float): Description.
-        y (float): Description.
-    """
-    x: float
-    y: float
-```
+![Complex Example](assets/complex.gif)   
 
 More examples can be found in [examples/](examples/).
 
-PEP 257 notes:
+**PEP 257 notes**:
 - Class docstrings get a summary only; `__init__` parameters are documented in `__init__`
 - `None` return types are omitted
 - `Raises:` is only generated when the function body contains `raise` statements
