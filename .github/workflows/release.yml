@@ -59,11 +59,20 @@ jobs:
                     -C target/${{ matrix.target }}/release \
                     ${{ matrix.binary }}
 
+                  # Generate SHA256 checksum
+                  if [ "$RUNNER_OS" == "Windows" ]; then
+                    certutil -hashfile python-autodoc-lsp-${{ matrix.target }}.tar.gz SHA256 > python-autodoc-lsp-${{ matrix.target }}.tar.gz.sha256
+                  else
+                    shasum -a 256 python-autodoc-lsp-${{ matrix.target }}.tar.gz > python-autodoc-lsp-${{ matrix.target }}.tar.gz.sha256
+                  fi
+
             - name: Upload artifact
               uses: actions/upload-artifact@v4
               with:
                   name: python-autodoc-lsp-${{ matrix.target }}
-                  path: python-autodoc-lsp-${{ matrix.target }}.tar.gz
+                  path: |
+                      python-autodoc-lsp-${{ matrix.target }}.tar.gz
+                      python-autodoc-lsp-${{ matrix.target }}.tar.gz.sha256
 
     release:
         name: Create release
@@ -80,5 +89,7 @@ jobs:
             - name: Create GitHub release
               uses: softprops/action-gh-release@v2
               with:
-                  files: python-autodoc-lsp-*.tar.gz
+                  files: |
+                      python-autodoc-lsp-*.tar.gz
+                      python-autodoc-lsp-*.tar.gz.sha256
                   generate_release_notes: true
