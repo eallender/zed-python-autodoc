@@ -1,4 +1,4 @@
-id = "python-autodoc"
+id = "python-autodoc-lsp"
 name = "Python Auto-Doc"
 version = "0.1.0"
 schema_version = 1
@@ -6,9 +6,9 @@ authors = ["Evan Allender <evan.allender@gmail.com>"]
 description = "Auto-generates PEP 257 docstrings for Python"
 repository = "https://github.com/eallender/zed-python-autodoc"
 
-[language_servers.python-autodoc]
+[language_servers.python-autodoc-lsp]
 name = "Python Autodoc LSP"
 languages = ["Python"]
 
-[language_servers.python-autodoc.language_ids]
+[language_servers.python-autodoc-lsp.language_ids]
 Python = "python"
