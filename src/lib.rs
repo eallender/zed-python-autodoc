@@ -62,12 +62,15 @@ impl PythonAutodocExtension {
             env!("CARGO_PKG_VERSION"),
             asset
         );
+        // download_file extracts the tar into a directory named binary_name,
+        // so the actual binary path is binary_name/binary_name.
+        let extracted_path = format!("{}/{}", binary_name, binary_name);
         let download_err =
             match zed::download_file(&url, binary_name, zed::DownloadedFileType::GzipTar) {
                 Ok(()) => {
-                    zed::make_file_executable(binary_name)?;
-                    self.cached_binary_path = Some(binary_name.to_string());
-                    return Ok(binary_name.to_string());
+                    zed::make_file_executable(&extracted_path)?;
+                    self.cached_binary_path = Some(extracted_path.clone());
+                    return Ok(extracted_path);
                 }
                 Err(e) => e,
             };
