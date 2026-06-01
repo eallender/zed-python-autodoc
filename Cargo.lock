@@ -528,14 +528,14 @@ dependencies = [
 
 [[package]]
 name = "python-autodoc"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "zed_extension_api",
 ]
 
 [[package]]
 name = "python-autodoc-lsp"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "tokio",
  "tower-lsp-server",
