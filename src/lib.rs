@@ -52,21 +52,7 @@ impl PythonAutodocExtension {
             _ => return Err("python-autodoc-lsp does not support this platform".to_string()),
         };
 
-        // Dev: look for a locally-built binary in the open worktree's target/ directory.
-        let root = std::path::PathBuf::from(worktree.root_path());
-        for rel_path in &[
-            format!("target/{}/release/{}", target_triple, binary_name),
-            format!("target/release/{}", binary_name),
-        ] {
-            let full_path = root.join(rel_path);
-            if full_path.exists() {
-                let path = full_path.to_string_lossy().into_owned();
-                self.cached_binary_path = Some(path.clone());
-                return Ok(path);
-            }
-        }
-
-        // Installed extension: download the pre-built binary from GitHub Releases.
+        // Download the pre-built binary from GitHub Releases.
         // Release assets must follow the naming convention:
         //   python-autodoc-lsp-{target_triple}.tar.gz
         // containing a single `python-autodoc-lsp[.exe]` binary at the archive root.
