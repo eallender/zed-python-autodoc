@@ -1,6 +1,9 @@
 # Python Autodoc for Zed
-
----
+<p align="center">
+  <img src="https://img.shields.io/badge/Zed-Extension-7C3AED?logo=zedindustries" alt="Zed Extension" />
+  <img src="https://img.shields.io/github/downloads/eallender/zed-python-autodoc/total" alt="Downloads" />
+  <img src="https://img.shields.io/github/v/release/eallender/zed-python-autodoc" alt="Release" />
+</p>
 
 Generates PEP 257 docstrings for Python functions and classes. Type `"""` on the line after a definition to trigger completion.
 
