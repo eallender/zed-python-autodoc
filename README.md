@@ -34,6 +34,27 @@ More examples can be found in [examples/](examples/).
 - `None` return types are omitted
 - `Raises:` is only generated when the function body contains `raise` statements
 
+## Troubleshooting
+
+### The extension doesn't generate docstrings
+
+- Ensure the extension is installed and enabled.
+- Make sure the file is recognized as a Python file.
+
+### The exetension is failing to register for Python
+
+If you've overridden the list of Python language servers in your `settings.json`, you'll need to include `python-autodoc-lsp` in the list. For example:
+
+```json
+{
+  "languages": {
+    "Python": {
+      "language_servers": ["...", "python-autodoc-lsp"]
+    }
+  }
+}
+```
+
 ## License
 
 MIT — see [LICENSE](LICENSE).
